@@ -1,109 +1,191 @@
-# Valheim-Atlas - Independent performance and activity visualization for Valheim servers.
+# Valheim Atlas
 
-Valheim Atlas is an independent, unofficial project.
-Not affiliated with, endorsed by, or supported by Iron Gate or Valheim.
+> Independent, unofficial project.  
+> Not affiliated with, endorsed by, or supported by Iron Gate AB or Valheim.  
+> This tool does not modify gameplay and is not an MMO framework.
+>
+> “Valheim” is a registered trademark of Iron Gate AB.
 
-“Valheim” is a registered trademark of Iron Gate AB.
+---
+
+## Overview
+
+Valheim Atlas is a **read-only analysis and visualization tool** for Valheim servers.
+
+It helps server operators understand how their world is actually used over time:
+where players concentrate, how movement flows across the map,
+and how persistent world load evolves as the server grows.
+
+Valheim Atlas does **not** change gameplay, balance, mechanics, or progression.
+It only observes, aggregates, and visualizes server-side data.
+
+---
+
+## Use Case
+
+Valheim Atlas is designed for **server administrators and operators** who want
+long-term visibility into world activity and load patterns.
+
+Typical questions Valheim Atlas helps answer:
+
+- Where do players concentrate during peak hours?
+- Which areas of the world accumulate high ZDO density?
+- How does player movement flow between regions?
+- How does world load evolve over days or weeks?
+- Are there emerging hotspots caused by building or activity clustering?
+
+The tool is especially useful for:
+- Persistent or long-running servers
+- Community build worlds
+- Performance and stability observation
+- Historical analysis (without wipes)
+
+---
+
+## System Architecture
+
+Valheim Atlas consists of three components that form a simple, one-directional pipeline:
+
+1. **Server Plugin**  
+   A lightweight BepInEx plugin emits telemetry data from the Valheim server.
+
+2. **Aggregator**  
+   A Python-based process aggregates raw events into time-based frames
+   and prepares them for visualization.
+
+3. **Static Web Viewer**  
+   A browser-based viewer renders maps, overlays, and timelines
+   from the aggregated data.
+
+Data always flows in one direction:
+
+Valheim Server → Plugin → Aggregator → Static Viewer
 
 
-This repository contains a Valheim server plugin, a Python aggregator, and a static web viewer that together produce a time-bucketed performance map (players, flow, and world ZDO density) for server analysis.
+There is no live server interaction and no client-side dependency.
 
-## What’s Included
+---
 
-- **Plugin** (`ValheimHeatFlowPlugin/`)
-  - BepInEx plugin that emits JSONL streams:
-    - `player_positions.jsonl`
-    - `player_flow.jsonl`
-    - `hotspots_world_zdos.jsonl` (world ZDO density, incremental deltas)
-- **Aggregator** (`aggregator.py`)
-  - Tails JSONL streams, applies TTL to players/flow, builds frames, and writes:
-    - `out/frame_live.json`
-    - `out/frames/frame_*.json`
-    - `out/manifest.json`
-- **Viewer** (`out/index.html`, `out/viewer.data.js`, `out/viewer.render.js`, `out/viewer.ui.js`)
-  - Static HTML/JS viewer that renders the map and overlays from frames.
+## Plugin Installation (BepInEx)
 
-## Data Flow (End‑to‑End)
+The Valheim Atlas plugin is distributed as a **prebuilt DLL via GitHub Releases**.
 
-```
-Valheim Server (BepInEx Plugin)
-  -> JSONL streams (input/)
-  -> Aggregator (aggregator.py)
-  -> Frames + manifest (out/)
-  -> Viewer (out/index.html + viewer modules)
-```
+### Installation
 
-## Quick Start
+1. Download the latest plugin DLL from the GitHub Releases page
+2. Place the DLL into:
 
-### 1) Build/Install the Plugin
+BepInEx/plugins/
 
-- Build `ValheimHeatFlowPlugin/ValheimHeatFlowPlugin.csproj` (BepInEx plugin).
-- Deploy the compiled DLL to your Valheim server’s BepInEx plugins folder.
-- The plugin writes JSONL files under the server's config path (`Paths.ConfigPath/heatflow`).
+3. Restart the Valheim server
 
-### 2) Run the Aggregator
+The plugin:
+- has no in-game UI
+- does not affect gameplay
+- only emits telemetry data
 
-```bash
-python aggregator.py --root . --input ./input --out ./out --state ./state
-```
+---
 
-The aggregator expects these files in `input/` (or your configured input path):
-- `player_positions.jsonl`
-- `player_flow.jsonl`
-- `hotspots_world_zdos.jsonl`
+## Aggregator
 
-### 3) Serve the Viewer
+The aggregator is a Python script that:
+- reads emitted telemetry data
+- groups events into time buckets
+- produces frame-based JSON outputs
+- maintains lightweight health and state metadata
 
-```bash
-python -m http.server --directory out
-```
+It is designed to:
+- run alongside the server
+- fail safely (no hard crashes)
+- regenerate derived data from existing frames
 
-Then open `http://localhost:8000/` in your browser.
+See:
+ `docs/Data_Streams_Explanation/Aggregator_Explanation.md`
+ `docs/DEBUG_RUNBOOK.md`
 
-## Viewer Controls
+---
 
-- **Live / Archive**: Live reads `frame_live.json`; Archive scrubs `out/frames/`.
-- **Transport (Archive only)**: `<<` / Play‑Pause / `>>` with speed 1x/3x/5x (frames per second).
-- **Seek**: “Go to time” input jumps to nearest manifest frame (local time by default; `Z` for UTC).
-- **Layers**: Players, Player Flow, World ZDO Density, Locations.
-- **Debug HUD**: Bottom-left diagnostics; `?diag=1` enables extra hotspot diagnostics.
-- **Buffers + Union window** (query params):
-  - `?archiveBuffer=<n>` (default 120) archive cache window size.
-  - `?archivePrefetch=<n>` (default 20) max archive prefetch per pump.
-  - `?liveRing=<n>` (default 30) live ring buffer size.
-  - `?union=0|1` (default 1) toggle union aggregation.
-  - `?unionN=<n>` (default 5) union window size.
-  - `?unionTopN=<n>` (default 500) TopN after union merge.
+## Viewer
 
-## Core Formats
+The viewer is a **static web application** (HTML + JavaScript).
 
-### World ZDO Density (hotspots_world_zdos, zdo_schema)
+It supports:
+- live and historical playback
+- heatmaps and activity overlays
+- time-based navigation
+- layered visualization modes
 
-```json
-{
-  "type": "hotspots_world_zdos",
-  "schema": "zdo_schema",
-  "t": "2026-01-01T00:00:00Z",
-  "bucket_s": 30,
-  "epoch": 0,
-  "zones": [{ "zx": 1, "zy": 2, "count": 10 }]
-}
-```
+No backend server is required.
+Opening `index.html` in a browser is sufficient.
 
-### Frame Output (out/frame_live.json)
+### Viewer Controls
 
-```json
-{
-  "meta": { "t": "2026-01-01T00:00:00Z", "counts": { "...": 1 } },
-  "players": [{ "id": "uid:...", "x": 100, "z": 200, "zx": 1, "zy": 3 }],
-  "flow": [{ "a": { "zx": 1, "zy": 2 }, "b": { "zx": 3, "zy": 4 }, "c": 5 }],
-  "hotspots": { "world_zdos": [{ "zx": 1, "zy": 2, "count": 10 }] },
-  "hotspots_meta": { "world_zdos": { "p90": 100, "p99": 1000, "epoch": 0 } }
-}
-```
+The viewer allows inspection of server activity using:
+- timeline controls
+- overlay toggles
+- map layers
+- density and flow visualizations
+
+---
+
+## Repository Scope
+
+This repository contains:
+- Aggregator scripts
+- Static web viewer
+- System and data format documentation
+
+The **plugin binary** is distributed via GitHub Releases.
+The repository does **not** include:
+- Valheim binaries
+- Unity assemblies
+- BepInEx dependencies
+- runtime telemetry data
+
+---
+
+## Data Formats (Reference)
+
+The following documents describe internal data formats and states.
+They are intended for **advanced users and developers**:
+
+- Player positions
+- Player flow states
+- Hotspot states
+- Performance maps
+- World and map metadata
+
+See the `docs/` directory for detailed specifications.
+
+---
+
+## Non-Goals
+
+Valheim Atlas explicitly does **not** aim to be:
+- an MMO framework
+- a gameplay modification
+- a server replacement
+- a performance optimization mod
+- a live admin control tool
+
+Its sole purpose is **observation and visualization**.
+
+---
 
 ## License
-This project is licensed under a custom non-resale license.
-Commercial server usage is allowed. Selling the software itself is prohibited.
 
+This project is licensed under a custom non-resale license.
+
+Commercial server usage is allowed.  
+Redistribution or resale of the software itself is prohibited.
+
+See `LICENSE` for details.
+
+---
+
+## Disclaimer
+
+This is an independent, community-driven project.
+No official support or guarantees are provided.
+Use at your own risk.
 
