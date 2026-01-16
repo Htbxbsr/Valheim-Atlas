@@ -75,7 +75,9 @@ The Valheim Atlas plugin is distributed as a **prebuilt DLL via GitHub Releases*
 1. Download the latest plugin DLL from the GitHub Releases page
 2. Place the DLL into:
 
+```
 BepInEx/plugins/
+```
 
 3. Restart the Valheim server
 
@@ -106,31 +108,45 @@ See:
 ## Aggregator Input Configuration
 
 By default, the Valheim Atlas aggregator expects its input data in a local
-`input/` directory relative to its working directory.
+input/ directory relative to its working directory.
 
 However, the Valheim Atlas server plugin writes telemetry data to the following
 location by default:
 
+```
 BepInEx/config/heatflow/
+```
 
-This means one of the following setups is required at startup:
+
+This means one of the following setups is required at startup.
 
 Option 1: Pass input directory explicitly (recommended)
 
 Run the aggregator with an explicit input path pointing to the plugin output:
 
+```
 python aggregator.py --input /path/to/Valheim/BepInEx/config/heatflow
-
+```
 Option 2: Symlink or copy data into input/
 
 Create a symlink or periodically copy the plugin output directory
-into the aggregator's expected `input/` directory.
+into the aggregator's expected input/ directory.
 
+Linux / Unix:
+```
 ln -s /path/to/Valheim/BepInEx/config/heatflow ./input
+```
+
+Windows (directory junction):
+```
+mklink /J input C:\path\to\Valheim\BepInEx\config\heatflow
+```
+
+The default behavior is intentional to keep the aggregator decoupled from any
+specific Valheim or BepInEx installation.
 
 The aggregator does not modify input data.
 It only reads and aggregates existing telemetry files.
----
 
 ## Viewer
 
