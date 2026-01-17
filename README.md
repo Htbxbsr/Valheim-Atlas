@@ -1,5 +1,5 @@
 # Valheim Atlas
-![Valheim Atlas – example map view](docs/images/atlas_example.png)
+![Valheim Atlas – example map view](docs/Atlas_example.png)
 
 > Independent, unofficial project.  
 > Not affiliated with, endorsed by, or supported by Iron Gate AB or Valheim.  
