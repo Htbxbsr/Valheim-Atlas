@@ -250,6 +250,7 @@ The viewer allows inspection of server activity using:
 - overlay toggles
 - map layers
 - density and flow visualizations
+- a top-left Players HUD (frame-scoped; click a name to center)
 
 ---
 

@@ -81,6 +81,53 @@
     setDeltaLabel(delta);
   }
 
+  function updatePlayersHud(frame) {
+    if (!el.playersHud) return;
+    el.playersHud.style.display = '';
+    const players = Array.isArray(frame?.players) ? frame.players : [];
+    const items = [];
+    for (const p of players) {
+      if (!p || typeof p !== 'object') continue;
+      const name = (p?.name ?? '').toString().trim();
+      const id = (p?.id ?? '').toString().trim();
+      const uid = p?.uid ?? p?.player_id ?? p?.playerId ?? null;
+      const uidStr = uid != null ? String(uid).trim() : '';
+      const label = name || id || 'uid:unknown';
+      const ghost =
+        uid === 0 || uidStr === '0' ||
+        ((!name && !id) && (uid === 0 || uidStr === '0')) ||
+        label === 'uid:0';
+      if (ghost) continue;
+      const x = Number(p?.x);
+      const z = Number(p?.z);
+      items.push({ label, x, z });
+    }
+    const count = items.length;
+    const header = `<div class="title">Players in frame (${count}):</div>`;
+    if (count === 0) {
+      el.playersHud.innerHTML = `${header}<div class="muted">None</div>`;
+      return;
+    }
+    const rows = items.map((it) => {
+      const dataX = Number.isFinite(it.x) ? it.x : '';
+      const dataZ = Number.isFinite(it.z) ? it.z : '';
+      return `<button type="button" data-x="${dataX}" data-z="${dataZ}">• ${it.label}</button>`;
+    }).join('');
+    el.playersHud.innerHTML = header + rows;
+  }
+
+  function centerOnWorld(x, z) {
+    if (!state.mapReady || !Number.isFinite(x) || !Number.isFinite(z)) return;
+    const { px, py } = worldToMapPx(x, z);
+    const cw = el.canvas.clientWidth;
+    const ch = el.canvas.clientHeight;
+    const zoom = Math.max(0.6, state.view.zoom);
+    state.view.zoom = zoom;
+    state.view.panX = (cw / 2) - px * zoom;
+    state.view.panY = (ch / 2) - py * zoom;
+    draw();
+  }
+
   function stopTransport() {
     state.transport.playing = false;
     if (state.transport.timerId) {
@@ -436,6 +483,32 @@
     }, { passive: false });
 
     window.addEventListener('resize', () => { fitMap(); draw(); });
+
+    el.playersHud?.addEventListener('click', (ev) => {
+      const btn = ev.target?.closest?.('button');
+      if (!btn) return;
+      const x = Number(btn.getAttribute('data-x'));
+      const z = Number(btn.getAttribute('data-z'));
+      centerOnWorld(x, z);
+    });
+
+    window.addEventListener('keydown', (ev) => {
+      if (ev.defaultPrevented) return;
+      const tag = (ev.target && ev.target.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || ev.target?.isContentEditable) return;
+      if (!el.timeSlider) return;
+      if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+      const step = Number(el.timeSlider.step || 1) || 1;
+      const min = Number(el.timeSlider.min || 0) || 0;
+      const max = Number(el.timeSlider.max || 0) || 0;
+      const cur = Number(el.timeSlider.value || 0) || 0;
+      const next = ev.key === 'ArrowLeft' ? cur - step : cur + step;
+      const clamped = Math.max(min, Math.min(max, next));
+      if (clamped === cur) return;
+      el.timeSlider.value = String(clamped);
+      el.timeSlider.dispatchEvent(new Event('input', { bubbles: true }));
+      ev.preventDefault();
+    });
   }
 
   function zoomAt(mx, my, factor) {
@@ -550,6 +623,7 @@
     state.worldZdosByZone = idx.map;
     state.worldZdosZones = idx.zones;
     state.worldZdosAvailable = idx.available;
+    updatePlayersHud(norm);
     return norm;
   }
 
@@ -610,6 +684,7 @@
     removeLegacyTimeControls();
     // Wire UI first (so fitMap/resize works)
     wireUi();
+    updatePlayersHud({ players: [] });
     state.debugEnabled = true;
     state.lockBiomeMode = !!el.chkLockBiome?.checked;
     if (el.btnBiomeMode) el.btnBiomeMode.disabled = state.lockBiomeMode;

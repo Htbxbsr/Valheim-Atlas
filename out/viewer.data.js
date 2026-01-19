@@ -51,6 +51,7 @@
     locationTooltip: null,
     flowTooltip: $('flowTooltip'),
     coordHud: $('coordHud'),
+    playersHud: $('playersHud'),
     infoCard: $('infoCard'),
   };
 

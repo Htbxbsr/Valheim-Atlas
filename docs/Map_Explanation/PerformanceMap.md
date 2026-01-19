@@ -66,6 +66,7 @@ Viewer:
 - Archive mode uses a bounded frame buffer; LIVE uses a bounded ring buffer.
 - Hotspots can be rendered as a union window over the last N frames in the current buffer/ring.
 - Transport controls advance ARCHIVE frames at fixed frames/sec (1x/3x/5x); seek jumps to nearest frame by time.
+- A top-left Players HUD lists the frame-scoped players and supports click-to-center.
 
 
 ## 3. Core Components

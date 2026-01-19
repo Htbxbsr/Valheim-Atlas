@@ -242,6 +242,7 @@ All plugin config is in `ValheimHeatFlowPlugin/Class1.cs` and uses `Config.Bind`
 **Debug overlay**
 - Always enabled; content updates on mouse move and is refreshed periodically (~4 Hz) while the cursor is over the canvas.
 - The debug panel shows biome/hotspot/location status; world/zone coordinates are shown in the top-left HUD.
+- A Players HUD below the cursor HUD lists frame-scoped players and allows click-to-center.
 - **Where:** `out/viewer.data.js:updateDebugOverlay`, `out/viewer.data.js:maybeUpdateDebug`, timer in `out/viewer.ui.js` mousemove handler.
 
 ## 4) Rotation tool (tools/rotate_monthly.py)
