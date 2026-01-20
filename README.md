@@ -67,7 +67,7 @@ There is no live server interaction and no client-side dependency.
 
 ---
 
-## Plugin Installation (BepInEx)
+# Plugin Installation (BepInEx)
 
 The Valheim Atlas plugin is distributed as a **prebuilt DLL via GitHub Releases**.
 
@@ -89,7 +89,7 @@ The plugin:
 
 ---
 
-## Aggregator
+# Aggregator
 
 The aggregator is a Python script that:
 - reads emitted telemetry data
@@ -106,7 +106,7 @@ See:
  `docs/Data_Streams_Explanation/Aggregator_Explanation.md`
  `docs/DEBUG_RUNBOOK.md`
 
-## Aggregator Input Configuration
+## Configuration
 
 By default, the Valheim Atlas aggregator expects its input data in a local
 input/ directory relative to its working directory.
@@ -117,18 +117,17 @@ location by default:
 ```
 BepInEx/config/heatflow/
 ```
-
-
 This means one of the following setups is required at startup.
 
-Option 1: Pass input directory explicitly (recommended)
+
+**Option 1: Pass input directory explicitly (recommended)**
 
 Run the aggregator with an explicit input path pointing to the plugin output:
 
 ```
 python aggregator.py --input /path/to/Valheim/BepInEx/config/heatflow
 ```
-Option 2: Symlink or copy data into input/
+**Option 2: Symlink or copy data into input/**
 
 Create a symlink or periodically copy the plugin output directory
 into the aggregator's expected input/ directory.
@@ -149,7 +148,151 @@ specific Valheim or BepInEx installation.
 The aggregator does not modify input data.
 It only reads and aggregates existing telemetry files.
 
-### Map Data (Base Map & Locations)
+# Persistent Integration
+
+Valheim Atlas is designed to run alongside a long-lived (“forever”) Valheim server
+without requiring wipes, resets, or manual intervention during normal operation.
+This section describes how to integrate the aggregator into a running server
+and how to operate it safely over long time spans.
+
+## Recommended Runtime Model
+
+Valheim Atlas follows a sidecar model:
+
+- The Valheim server runs unchanged
+- The Atlas plugin emits append-only JSONL telemetry
+- The Python aggregator runs as a long-lived companion process
+```
+Valheim Server (BepInEx)
+├─ BepInEx/config/heatflow/*.jsonl   ← raw telemetry (append-only)
+│
+├─ aggregator (Python process)
+│   ├─ state/     ← offsets + caches
+│   ├─ out/       ← live + archive frames
+│   └─ archive/   ← rotated monthly data (optional)
+│
+└─ static viewer (served or opened locally)
+```
+
+The aggregator must not run inside the Valheim process.
+It should be managed independently (systemd, tmux, Docker, etc.).
+
+## Integrating Aggregator Start/Stop into Server Operation
+
+For long-running servers, the Atlas aggregator should be started and stopped
+via scripts that are referenced by the Valheim server startup/shutdown process.
+
+The aggregator is intended to run as a managed companion process
+(e.g. via start/stop scripts, systemd, tmux, Docker, or similar),
+not as a manually launched tool.
+
+Typical setup:
+- Valheim server startup script starts the aggregator
+- Valheim server shutdown script stops the aggregator
+
+The aggregator can be started safely at any time.
+It will resume from its last persisted offsets.
+
+Example (Linux, simplified):
+```
+python aggregator.py \
+  --input /path/to/Valheim/BepInEx/config/heatflow \
+  --out   /path/to/atlas/out \
+  --state /path/to/atlas/state
+```
+The aggregator writes offsets and state continuously.
+No special shutdown step is required.
+
+## Safe Restart Behavior (No Data Loss)
+
+The aggregator is designed to survive restarts:
+
+- Stream offsets are persisted in state/offsets.json
+- World ZDO density cache is persisted in state/world_zdos_cache.json
+- Player and flow TTL are frame-based and re-established naturally
+
+On restart:
+- No historical data is re-counted
+- No frames are invalidated
+- Visualization resumes seamlessly
+
+A restart of the server, the aggregator, or both
+does not require a wipe or reset.
+
+## Enabling Long-Term Operation
+
+To keep a Valheim Atlas installation healthy over months or years,
+the following practices are recommended.
+
+### **1. Monthly Rotation (Raw Data + Frames)**
+
+Raw JSONL streams and frame archives grow indefinitely by design.
+Use the provided rotation tool during a restart window
+(e.g. once per month):
+```
+python tools/rotate_monthly.py
+```
+
+This will:
+- archive previous-month JSONL streams (gzipped)
+- archive previous-month frames
+- keep current-month data intact
+- preserve playback integrity
+- Rotation is idempotent and safe.
+
+### **2. Never Delete state/ During Normal Operation**
+
+The state/ directory contains:
+- stream offsets
+- cached world ZDO density
+
+Deleting it will cause:
+
+- loss of restart continuity
+- unnecessary re-aggregation
+- distorted historical thresholds
+
+Only delete state/ if you explicitly want a fresh logical start.
+
+### **3. World Growth**
+
+Valheim Atlas does not assume a bounded world lifetime.
+World ZDO density is:
+- incremental
+- epoch-based
+- lazily overwritten
+
+This means:
+- old areas naturally decay in visibility
+- abandoned builds fade over time
+- active zones remain highlighted
+- The map reflects current relevance, not permanent accumulation.
+
+## Design Guarantees
+
+Valheim Atlas guarantees:
+- No gameplay impact
+- No server tick hooks outside normal update flow
+- No memory growth proportional to world age
+- No requirement for wipes or resets
+
+All derived data can be regenerated from raw telemetry
+
+If Atlas is removed entirely:
+- the Valheim server continues normally
+- no world data is affected
+- When to Restart / Rotate
+
+## Recommended restart points:
+
+- Valheim version updates
+- Plugin updates
+- Monthly rotation window
+- Planned server maintenance
+
+Unplanned crashes or restarts are handled automatically.
+
+# Map Files and Viewer
 
 Valheim Atlas uses a static world map image as the base layer for all visualizations.
 Map and location data are not generated by Valheim Atlas.
@@ -160,7 +303,7 @@ Use valheim-map.world with your world seed to generate:
 
 Base map image (recommended: 8192×8192) → map.png
 
-All map data / locations export → map.json and locations.json
+All map data / locations export (recommended: 8192×8192) → tiles, map.json and locations.json
 
 ## Required Files (Viewer)
 
@@ -194,8 +337,8 @@ out/
 └─ map/
    └─ data/
       ├─ map.json               # map metadata (from valheim.world export)
-      ├─ locations.json         # named locations (optional but recommended)
-      └─ tiles/                 # optional tiles (if used by your viewer setup)
+      ├─ locations.json         # named locations (from valheim.world export)
+      └─ tiles/                 # seed based map tiles (from valheim.world export)      
 ```
 
 ### Directory Creation
@@ -225,23 +368,32 @@ out/map/data/.
 ### Notes
 
 The map image is a static reference layer used for visualization only.
-
 Valheim Atlas does not validate or modify map data.
-
 Correct generation/export is the responsibility of the server operator.
 
 ## Viewer
 
 The viewer is a **static web application** (HTML + JavaScript).
 
-It supports:
-- live and historical playback
-- heatmaps and activity overlays
-- time-based navigation
-- layered visualization modes
+No backend application server is required.
+There is no API and no server-side logic.
 
-No backend server is required.
-Opening `index.html` in a browser is sufficient.
+### Running the Viewer
+
+For reliable operation (especially Live mode),
+the files should be served via a simple static HTTP server.
+Example:
+```bash
+python -m http.server --directory out
+```
+
+Then open:
+```
+http://localhost:8000/
+```
+
+Opening index.html directly via file:// may work in some browsers,
+but is not guaranteed due to browser security restrictions.
 
 ### Viewer Controls
 
@@ -251,7 +403,6 @@ The viewer allows inspection of server activity using:
 - map layers
 - density and flow visualizations
 - a top-left Players HUD (frame-scoped; click a name to center)
-
 ---
 
 ## Repository Scope
