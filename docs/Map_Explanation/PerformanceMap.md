@@ -66,7 +66,7 @@ Viewer:
 - Archive mode uses a bounded frame buffer; LIVE uses a bounded ring buffer.
 - Hotspots can be rendered as a union window over the last N frames in the current buffer/ring.
 - Transport controls advance ARCHIVE frames at fixed frames/sec (1x/3x/5x); seek jumps to nearest frame by time.
-- A top-left Players HUD lists the frame-scoped players and supports click-to-center.
+- A top-left Players HUD lists the frame-scoped players and supports click-to-center + follow (follow is reliable in Firefox; Chrome may be inconsistent).
 
 
 ## 3. Core Components
@@ -161,6 +161,16 @@ Responsibilities:
   - player flow
 - Provide inspection overlays and cursor coordinate HUD.
 
+Rendering architecture:
+- Two canvases: `mapCanvas` for the base map and `canvas` for overlays.
+- Overlays are cached in map-space offscreen layers to reduce per-frame work.
+- Chromium playback offloads heavy work to `out/viewer.decode.worker.js`:
+  - Flow aggregation
+  - Frame JSON parse/normalize
+  - Union hotspots + buckets
+  - Flow + player overlay rendering (ImageBitmap)
+- If `OffscreenCanvas` is unavailable or the worker errors, the viewer falls back to main-thread rendering.
+
 Biome lookup:
 - Uses TileGrid data (`out/map/data/map.json` + `tiles/*.bin.gz`).
 - Uses World Space (x,z) only; PNG is visualization only.
@@ -192,6 +202,7 @@ out/
   viewer.data.js
   viewer.render.js
   viewer.ui.js
+  viewer.decode.worker.js
   frame_live.json
   frames/frame_*.json
   manifest.json
@@ -224,6 +235,12 @@ Query params (from `out/viewer.data.js`) control buffering and union behavior:
 - `union` (default 1): enable/disable union aggregation.
 - `unionN` (default 5): union window size.
 - `unionTopN` (default 500): TopN applied after union merge.
+
+Playback tuning (Chromium only, optional):
+- `playOverlayFps` (default 28): overlay rebuild cap during playback.
+- `playOverlayScale` (default 0.7): downscale flow+players overlays during playback.
+- `playFlowFps`, `playPlayersFps`: per-layer FPS overrides.
+- `playFlowScale`, `playPlayersScale`: per-layer scale overrides.
 
 
 ## 5. Limitations and Design Decisions

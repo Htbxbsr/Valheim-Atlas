@@ -6,6 +6,7 @@
 - A BepInEx plugin (`ValheimHeatFlowPlugin/Class1.cs`, `ValheimHeatFlowPlugin/Class2.cs`) emits JSONL streams for player positions, player flow, and world ZDO density.
 - A Python aggregator (`aggregator.py`) ingests JSONL streams, tracks offsets, applies TTL to players/flow, and writes `out/frame_live.json`, `out/frames/frame_*.json`, and `out/manifest.json`.
 - A browser viewer (`out/index.html`, `out/viewer.data.js`, `out/viewer.render.js`, `out/viewer.ui.js`) renders the map and overlays (players, flow, hotspots, locations) using HTML canvas.
+- Chromium playback offloads heavy work to `out/viewer.decode.worker.js` (flow aggregation, JSON parse, union hotspots/buckets, flow/player rendering).
 - Hotspots are currently **World ZDO Density** (`hotspots_world_zdos`, `zdo_schema`), computed as incremental deltas per bucket.
 - Player positions and flow are TTL-based in the aggregator (10 emitted frames), and the viewer renders frames verbatim (`aggregator.py`, `docs/PlayerPositions_Audit.md`).
 - The pipeline is file-based; no server-side API or database is present in code (`aggregator.py`, viewer modules).
@@ -34,6 +35,8 @@
 - **Viewer**: `out/viewer.data.js`, `out/viewer.render.js`, `out/viewer.ui.js`, `out/index.html`
   - Loads `out/manifest.json`, `out/frame_live.json`, and `out/frames/frame_*.json`.
   - Renders map overlays on canvas and provides an inspection/debug HUD.
+  - Uses split canvases (`mapCanvas` + overlay `canvas`) and cached overlay layers.
+  - Playback tuning params are exposed via query string (Chromium only).
 
 ### Data & control flow (high level)
 
@@ -70,7 +73,8 @@
   - Env: `HEATFLOW_ROOT`, `HEATFLOW_INPUT_DIR`, `HEATFLOW_OUT_DIR`, `HEATFLOW_STATE_DIR`, `HEATFLOW_POLL_S`, `HEATFLOW_CADENCE_S`, `HEATFLOW_HEARTBEAT_S`.
 - **Viewer** URL query params in `out/viewer.data.js`:
   - `manifest`, `live`, `frames`, `hr`, `flowMax`, `flowMin`, `debugZones`, `diag`,
-    `archiveBuffer`, `archivePrefetch`, `liveRing`, `union`, `unionN`, `unionTopN`.
+    `archiveBuffer`, `archivePrefetch`, `liveRing`, `union`, `unionN`, `unionTopN`,
+    `playOverlayFps`, `playOverlayScale`, `playFlowFps`, `playPlayersFps`, `playFlowScale`, `playPlayersScale` (Chromium playback only).
   - Tile decoding uses a Web Worker (`out/viewer.tile.worker.js`) to keep the UI responsive.
 
 ### External dependencies/services

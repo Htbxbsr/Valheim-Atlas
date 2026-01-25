@@ -221,6 +221,18 @@ All plugin config is in `ValheimHeatFlowPlugin/Class1.cs` and uses `Config.Bind`
 - `?unionTopN=<n>` (default `500`)
   - **What:** TopN applied after union merge.
   - **Where:** `out/viewer.data.js:65`
+- `?playOverlayFps=<n>` (default `28`, Chromium playback only)
+  - **What:** cap worker overlay rebuild rate during playback.
+  - **Where:** `out/viewer.data.js`
+- `?playOverlayScale=<n>` (default `0.7`, Chromium playback only)
+  - **What:** downscale flow+players overlays during playback (worker render scale).
+  - **Where:** `out/viewer.data.js`
+- `?playFlowFps=<n>` / `?playPlayersFps=<n>` (default `0` → inherits `playOverlayFps`)
+  - **What:** per-layer override for flow/players rebuild rate.
+  - **Where:** `out/viewer.data.js`, `out/viewer.render.js`
+- `?playFlowScale=<n>` / `?playPlayersScale=<n>` (default `0` → inherits `playOverlayScale`)
+  - **What:** per-layer override for flow/players render scale.
+  - **Where:** `out/viewer.data.js`, `out/viewer.render.js`
 - `?diag=1`
   - **What:** adds detailed frame/zones info to debug overlay (frame ts/epoch/lookup).
   - **Where:** `out/viewer.data.js:79`, diagnostics at `out/viewer.data.js:768–812`
@@ -243,7 +255,16 @@ All plugin config is in `ValheimHeatFlowPlugin/Class1.cs` and uses `Config.Bind`
 - Always enabled; content updates on mouse move and is refreshed periodically (~4 Hz) while the cursor is over the canvas.
 - The debug panel shows biome/hotspot/location status; world/zone coordinates are shown in the top-left HUD.
 - A Players HUD below the cursor HUD lists frame-scoped players and allows click-to-center.
+- Clicking a player name enables follow mode (locks view to that player on new frames). This is currently reliable in Firefox; Chrome may be inconsistent.
 - **Where:** `out/viewer.data.js:updateDebugOverlay`, `out/viewer.data.js:maybeUpdateDebug`, timer in `out/viewer.ui.js` mousemove handler.
+
+**Worker offload (Chromium playback)**
+- Flow aggregation, JSON parse/normalize, union hotspots/buckets, and flow/players rendering are offloaded to `out/viewer.decode.worker.js` during Chromium playback.
+- If `OffscreenCanvas` is unavailable or the worker errors, the viewer falls back to main-thread rendering and logs a one-time console message:
+  - `[Valheim Atlas] Worker offload disabled: OffscreenCanvas not supported.`
+  - `[Valheim Atlas] Worker offload disabled: worker error.`
+  - `[Valheim Atlas] Flow layer worker error. Falling back.`
+  - `[Valheim Atlas] Players layer worker error. Falling back.`
 
 ## 4) Rotation tool (tools/rotate_monthly.py)
 
