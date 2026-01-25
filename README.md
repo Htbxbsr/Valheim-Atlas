@@ -305,6 +305,15 @@ Base map image (recommended: 8192×8192) → map.png
 
 All map data / locations export (recommended: 8192×8192) → tiles, map.json and locations.json
 
+## Browser Notes
+Valheim Atlas relies heavily on advanced canvas rendering, worker offloading, and (where available) `OffscreenCanvas`.
+
+- **Firefox** currently provides the most stable and predictable behavior and is treated as the baseline.
+- **Chromium-based browsers** are supported on a best-effort basis only and may exhibit:
+      - reduced playback smoothness
+      - micro-stutter during scrubbing or zooming
+      - limited reliability for advanced features (e.g. follow-player mode)
+
 ## Required Files (Viewer)
 
 Valheim Atlas expects the following files:
@@ -313,6 +322,7 @@ Valheim Atlas expects the following files:
 out/index.html
 out/viewer.data.js
 out/viewer.render.js
+out/viewer.decode.worker.js
 out/viewer.tile.worker.js
 out/viewer.ui.js
 ```
