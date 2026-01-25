@@ -100,7 +100,14 @@
       if (ghost) continue;
       const x = Number(p?.x);
       const z = Number(p?.z);
-      items.push({ label, x, z });
+      items.push({
+        label,
+        x,
+        z,
+        name,
+        id,
+        uid: uidStr,
+      });
     }
     const count = items.length;
     const header = `<div class="title">Players in frame (${count}):</div>`;
@@ -111,9 +118,45 @@
     const rows = items.map((it) => {
       const dataX = Number.isFinite(it.x) ? it.x : '';
       const dataZ = Number.isFinite(it.z) ? it.z : '';
-      return `<button type="button" data-x="${dataX}" data-z="${dataZ}">• ${it.label}</button>`;
+      return `<button type="button" data-x="${dataX}" data-z="${dataZ}" data-name="${it.name}" data-id="${it.id}" data-uid="${it.uid}">• ${it.label}</button>`;
     }).join('');
     el.playersHud.innerHTML = header + rows;
+  }
+
+  function findPlayerMatch(frame, target) {
+    if (!target || !frame || !Array.isArray(frame.players)) return null;
+    const byUid = target.uid;
+    const byId = target.id;
+    const byName = target.name;
+    for (const p of frame.players) {
+      if (!p || typeof p !== 'object') continue;
+      const uid = p?.uid ?? p?.player_id ?? p?.playerId ?? null;
+      const uidStr = uid != null ? String(uid).trim() : '';
+      const name = (p?.name ?? '').toString().trim();
+      const id = (p?.id ?? '').toString().trim();
+      if (byUid && uidStr && uidStr === byUid) return p;
+      if (byId && id && id === byId) return p;
+      if (byName && name && name === byName) return p;
+    }
+    return null;
+  }
+
+  function followPlayerIfActive(frame) {
+    const target = state.followPlayer;
+    if (!target || !target.active) return;
+    const match = findPlayerMatch(frame, target);
+    if (!match) return;
+    const x = Number(match?.x);
+    const z = Number(match?.z);
+    if (!Number.isFinite(x) || !Number.isFinite(z)) return;
+    const { px, py } = worldToMapPx(x, z);
+    const cw = el.canvas.clientWidth;
+    const ch = el.canvas.clientHeight;
+    const zoom = Number.isFinite(target.zoom) ? target.zoom : state.view.zoom;
+    state.view.zoom = zoom;
+    state.view.panX = (cw / 2) - px * zoom;
+    state.view.panY = (ch / 2) - py * zoom;
+    state.playersLayerDirty = true;
   }
 
   function centerOnWorld(x, z) {
@@ -125,7 +168,8 @@
     state.view.zoom = zoom;
     state.view.panX = (cw / 2) - px * zoom;
     state.view.panY = (ch / 2) - py * zoom;
-    draw();
+    state.playersLayerDirty = true;
+    scheduleDraw();
   }
 
   function stopTransport() {
@@ -187,9 +231,15 @@
     if (!state.transport.playing || !isArchiveMode()) return;
     if (state.transport.timerId) clearTimeout(state.transport.timerId);
     const tickMs = getTransportTickMs();
+    const perfOn = PERF_MODE && state?.perf?.enabled;
+    const expectedAt = perfOn ? (performance.now() + tickMs) : 0;
     state.transport.timerId = setTimeout(() => {
       state.transport.timerId = null;
       if (!state.transport.playing || !isArchiveMode()) return;
+      if (perfOn) {
+        const now = performance.now();
+        state.perf.lastTransportLagMs = now - expectedAt;
+      }
       if (DIAG_MODE) {
         console.info(`transport:tick idx=${state.selectedFrameIdx} dir=${state.transport.direction} speed=${state.transport.speed}`);
       }
@@ -228,7 +278,7 @@
       state.deltaAnchorSec = null;
       console.info('mode=LIVE via button');
       scheduleFlowRebuild();
-      draw();
+      scheduleDraw();
     });
     el.btnArchive?.addEventListener('click', () => {
       state.modeLock = 'ARCHIVE';
@@ -240,7 +290,7 @@
         ensureArchiveBuffer(state.selectedFrameIdx);
         updateArchiveDelta(state.selectedFrameIdx);
       }
-      draw();
+      scheduleDraw();
     });
 
     // time slider
@@ -383,7 +433,7 @@
     el.togFlow?.addEventListener('change', () => {
       if (!el.togFlow?.checked && el.flowTooltip) el.flowTooltip.style.display = 'none';
       scheduleFlowRebuild();
-      draw();
+      scheduleDraw();
     });
     el.toggleLocations?.addEventListener('change', async () => {
       state.locationsEnabled = !!el.toggleLocations?.checked;
@@ -391,31 +441,31 @@
         await ensureLocationsLoaded();
       }
       maybeUpdateDebug(true);
-      draw();
+      scheduleDraw();
     });
     el.filterLocStart?.addEventListener('change', () => {
       state.locationFilters.START = !!el.filterLocStart?.checked;
-      draw();
+      scheduleDraw();
     });
     el.filterLocBoss?.addEventListener('change', () => {
       state.locationFilters.BOSS = !!el.filterLocBoss?.checked;
-      draw();
+      scheduleDraw();
     });
     el.filterLocSpecial?.addEventListener('change', () => {
       state.locationFilters.SPECIAL = !!el.filterLocSpecial?.checked;
-      draw();
+      scheduleDraw();
     });
     el.filterLocDungeons?.addEventListener('change', () => {
       state.locationFilters.DUNGEON = !!el.filterLocDungeons?.checked;
-      draw();
+      scheduleDraw();
     });
     el.filterLocTarPit?.addEventListener('change', () => {
       state.locationFilters.TARPIT = !!el.filterLocTarPit?.checked;
-      draw();
+      scheduleDraw();
     });
     el.filterLocRunestone?.addEventListener('change', () => {
       state.locationFilters.RUNESTONE = !!el.filterLocRunestone?.checked;
-      draw();
+      scheduleDraw();
     });
     // heat sliders
     if (el.heatRadius) {
@@ -424,32 +474,58 @@
       el.heatRadius.addEventListener('input', () => {
         visuals.heatRadiusPx = Number(el.heatRadius.value);
         updateVisualLabels();
-        draw();
+        state.worldZdosLayerDirty = true;
+        scheduleDraw();
       });
     }
 
 
     // zoom / pan / viewport
-    el.btnZoomIn?.addEventListener('click', () => { zoomAt(el.canvas.clientWidth/2, el.canvas.clientHeight/2, 1.10); });
-    el.btnZoomOut?.addEventListener('click', () => { zoomAt(el.canvas.clientWidth/2, el.canvas.clientHeight/2, 0.90); });
-    el.btnResetView?.addEventListener('click', () => { state.view = { zoom: 1.0, panX: 0, panY: 0 }; fitMap(); draw(); });
+    el.btnZoomIn?.addEventListener('click', () => { zoomAt(el.canvas.clientWidth/2, el.canvas.clientHeight/2, 1.10); scheduleDraw(); });
+    el.btnZoomOut?.addEventListener('click', () => { zoomAt(el.canvas.clientWidth/2, el.canvas.clientHeight/2, 0.90); scheduleDraw(); });
+    el.btnResetView?.addEventListener('click', () => { state.view = { zoom: 1.0, panX: 0, panY: 0 }; fitMap(); scheduleDraw(); });
+
+    // interaction QoS helper
+    function markInteraction() {
+      state.interaction.active = true;
+      state.interaction.lastAtMs = performance.now();
+      if (state.interaction.restoreTimer) clearTimeout(state.interaction.restoreTimer);
+      state.interaction.restoreTimer = setTimeout(() => {
+        if (state.dragging) {
+          markInteraction();
+          return;
+        }
+        state.interaction.active = false;
+        if (state.playersLayerHoldDuringInteraction) {
+          state.playersLayerHoldDuringInteraction = false;
+          state.playersLayerDirty = true;
+        }
+        scheduleDraw();
+      }, Math.max(50, Number(state.interactionRestoreMs || 160)));
+    }
+    state.markInteraction = markInteraction;
 
     // mouse pan
     el.canvas.addEventListener('mousedown', (ev) => {
       state.dragging = true;
       state.dragLast.x = ev.clientX;
       state.dragLast.y = ev.clientY;
+      markInteraction();
     });
-    window.addEventListener('mouseup', () => { state.dragging = false; });
+    window.addEventListener('mouseup', () => {
+      state.dragging = false;
+      markInteraction();
+    });
     window.addEventListener('mousemove', (ev) => {
       if (!state.dragging) return;
       const dx = ev.clientX - state.dragLast.x;
       const dy = ev.clientY - state.dragLast.y;
       state.dragLast.x = ev.clientX;
       state.dragLast.y = ev.clientY;
-      state.view.panX += dx;
-      state.view.panY += dy;
-      draw();
+      state.interaction.pendingPanDx += dx;
+      state.interaction.pendingPanDy += dy;
+      markInteraction();
+      scheduleDraw();
     });
     el.canvas.addEventListener('mousemove', (ev) => {
       state.cursor = { x: ev.clientX, y: ev.clientY };
@@ -474,15 +550,20 @@
     // wheel zoom at cursor
     el.canvas.addEventListener('wheel', (ev) => {
       ev.preventDefault();
-      const rect = el.canvas.getBoundingClientRect();
+      const rect = el.main?.getBoundingClientRect?.() || el.canvas.getBoundingClientRect();
       const mx = ev.clientX - rect.left;
       const my = ev.clientY - rect.top;
       const delta = Math.sign(ev.deltaY);
       const factor = delta > 0 ? 0.90 : 1.10;
-      zoomAt(mx, my, factor);
+      if (state.interaction) {
+        state.interaction.pendingZoomFactor *= factor;
+        state.interaction.pendingZoomCenter = { x: mx, y: my };
+      }
+      markInteraction();
+      scheduleDraw();
     }, { passive: false });
 
-    window.addEventListener('resize', () => { fitMap(); draw(); });
+    window.addEventListener('resize', () => { fitMap(); scheduleDraw(); });
 
     el.playersHud?.addEventListener('click', (ev) => {
       const btn = ev.target?.closest?.('button');
@@ -490,6 +571,13 @@
       const x = Number(btn.getAttribute('data-x'));
       const z = Number(btn.getAttribute('data-z'));
       centerOnWorld(x, z);
+      state.followPlayer = {
+        active: true,
+        name: (btn.getAttribute('data-name') || '').trim(),
+        id: (btn.getAttribute('data-id') || '').trim(),
+        uid: (btn.getAttribute('data-uid') || '').trim(),
+        zoom: state.view.zoom,
+      };
     });
 
     window.addEventListener('keydown', (ev) => {
@@ -512,13 +600,12 @@
   }
 
   function zoomAt(mx, my, factor) {
-    const beforeX = (mx - state.view.panX) / state.view.zoom;
-    const beforeY = (my - state.view.panY) / state.view.zoom;
-    const newZoom = clamp(state.view.zoom * factor, 0.05, 30);
-    state.view.zoom = newZoom;
-    state.view.panX = mx - beforeX * newZoom;
-    state.view.panY = my - beforeY * newZoom;
-    draw();
+    if (state.interaction) {
+      state.interaction.pendingZoomFactor *= factor;
+      state.interaction.pendingZoomCenter = { x: mx, y: my };
+    }
+    if (state.markInteraction) state.markInteraction();
+    scheduleDraw();
   }
 
   function scheduleScrubLoad(idx) {
@@ -548,7 +635,49 @@
         updateStatusLine('No archived frames available');
         return;
       }
-
+      if (state.isChromium && state.mode === 'ARCHIVE' && state.transport?.playing) {
+        const n = Math.max(1, Math.floor(cfg.unionN));
+        const useUnion = !!cfg.unionEnabled;
+        const unionFrames = useUnion ? getArchiveUnionFrames(state.selectedFrameIdx, n) : [res.fr];
+        const framesZones = unionFrames.map((fr) => getWorldZdosArray(fr) || []);
+        const topN = useUnion ? Math.max(1, Math.floor(cfg.unionTopN)) : Math.max(1, (getWorldZdosArray(res.fr) || []).length || 1);
+        const thresholdsMeta = res.fr?.hotspots_meta?.world_zdos || {};
+        if (typeof runUnionBucketsWorker === 'function') {
+          const msg = await runUnionBucketsWorker({
+            type: 'unionBuckets',
+            key: `${res.idx}:${n}:${useUnion ? 'u' : 'b'}`,
+            framesZones,
+            topN,
+            thresholdsMeta,
+            mapCal: {
+              mapCxPx: state.mapCal.mapCxPx,
+              mapCyPx: state.mapCal.mapCyPx,
+              mapRadiusPx: state.mapCal.mapRadiusPx,
+              worldRadius: state.mapCal.worldRadius,
+              offsetXPx: state.mapCal.offsetXPx,
+              offsetYPx: state.mapCal.offsetYPx,
+              zoneSize: cfg.zoneSize,
+            },
+          });
+          if (msg && msg.type === 'unionBucketsResult') {
+            const unionZones = Array.isArray(msg.unionZones) ? msg.unionZones : [];
+            if (useUnion) {
+              res.fr.__unionFrame = {
+                ...res.fr,
+                hotspots: { ...(res.fr.hotspots || {}), world_zdos: unionZones },
+                __worldZdosBuckets: msg.buckets,
+                __worldZdosThresholds: msg.thresholds,
+              };
+            } else {
+              res.fr.__unionFrame = {
+                ...res.fr,
+                __worldZdosBuckets: msg.buckets,
+                __worldZdosThresholds: msg.thresholds,
+              };
+            }
+          }
+        }
+      }
       ensureArchiveBuffer(res.idx);
       if (requestId != null && requestId !== state.scrubRequestId) return;
       setCurrentFrame(res.fr);
@@ -560,7 +689,7 @@
       updateSelectedLabel(res.resolvedSec, res.idx);
       updateStatusLine();
       scheduleFlowRebuild();
-      draw();
+      scheduleDraw();
       state.renderedFrameIdx = res.idx;
     } catch (e) {
       setPill(el.connPill, 'ERROR', false);
@@ -584,6 +713,10 @@
     if (fr && fr.hotspots && Array.isArray(fr.hotspots)) {
       fr.hotspots = { world_zdos: fr.hotspots };
     }
+    if (fr && fr.__precomputedHotspots) {
+      fr.hotspots = fr.__precomputedHotspots;
+      delete fr.__precomputedHotspots;
+    }
     return fr;
   }
 
@@ -591,7 +724,13 @@
     const norm = normalizeFrame(fr);
     state.frameRaw = norm;
     let renderFrame = norm;
-    if (cfg.unionEnabled) {
+    let usedWorkerUnion = false;
+    if (norm && norm.__unionFrame) {
+      renderFrame = norm.__unionFrame;
+      usedWorkerUnion = true;
+      delete norm.__unionFrame;
+    }
+    if (cfg.unionEnabled && !usedWorkerUnion) {
       const n = Math.max(1, Math.floor(cfg.unionN));
       const unionFrames = (state.mode === 'LIVE')
         ? getLiveUnionFrames(n)
@@ -619,11 +758,32 @@
       };
     }
     state.frame = renderFrame;
+    if (usedWorkerUnion && renderFrame && renderFrame.__worldZdosBuckets) {
+      const buckets = renderFrame.__worldZdosBuckets;
+      state.worldZdosBuckets = buckets;
+      state.worldZdosZones = buckets?.zones || [];
+      state.worldZdosAvailable = Array.isArray(state.worldZdosZones) && state.worldZdosZones.length > 0;
+      state.worldZdosByZone = new Map();
+      state.worldZdosThresholds = renderFrame.__worldZdosThresholds || null;
+      state.worldZdosLayerDirty = true;
+      state.playersLayerDirty = true;
+      updatePlayersHud(norm);
+      return norm;
+    }
     const idx = buildWorldZdosIndex(renderFrame);
     state.worldZdosByZone = idx.map;
     state.worldZdosZones = idx.zones;
     state.worldZdosAvailable = idx.available;
+    state.worldZdosThresholds = getWorldZdoThresholds(renderFrame);
+    if (state.mapReady && idx.available) {
+      state.worldZdosBuckets = buildWorldZdoBuckets(idx.zones, state.worldZdosThresholds);
+    } else {
+      state.worldZdosBuckets = null;
+    }
+    state.worldZdosLayerDirty = true;
+    state.playersLayerDirty = true;
     updatePlayersHud(norm);
+    followPlayerIfActive(norm);
     return norm;
   }
 
@@ -681,6 +841,25 @@
     }
     updateArchiveDelta(state.selectedFrameIdx);
 
+    if (PERF_MODE && typeof PerformanceObserver !== 'undefined') {
+      try {
+        const obs = new PerformanceObserver((list) => {
+          const entries = list.getEntries();
+          if (!entries || entries.length === 0) return;
+          let max = 0;
+          for (const e of entries) {
+            const d = Number(e?.duration) || 0;
+            if (d > max) max = d;
+          }
+          state.perf.longTaskLastMs = max;
+          state.perf.longTaskCount = (state.perf.longTaskCount || 0) + entries.length;
+          state.perf.longTaskAtMs = performance.now();
+        });
+        obs.observe({ entryTypes: ['longtask'] });
+        state.perf.longTaskObserver = obs;
+      } catch {}
+    }
+
     removeLegacyTimeControls();
     // Wire UI first (so fitMap/resize works)
     wireUi();
@@ -709,7 +888,7 @@
     // Reset view + fit
     state.view = { zoom: 1.0, panX: 0, panY: 0 };
     fitMap();
-    draw();
+    scheduleDraw();
 
     // Load manifest (loop until available)
     await loadManifestLoop();
@@ -720,6 +899,8 @@
 
     // Start polling
     async function tick() {
+      const perfOn = PERF_MODE && state?.perf?.enabled;
+      const tickStart = perfOn ? performance.now() : 0;
       try {
         if (!state.manifest) return;
 
@@ -787,14 +968,19 @@
           el.lastUpdate.textContent = state.frame?.meta?.t || '';
           el.datasource.textContent = resolveAgainstManifest(getFrameLivePath());
           updateStatusLine();
-          scheduleFlowRebuild();
-          draw();
-        }
-      } catch (e) {
-        // Keep UI alive
-        setPill(el.connPill, 'ERROR', false);
+        scheduleFlowRebuild();
+        scheduleDraw();
+      }
+    } catch (e) {
+      // Keep UI alive
+      setPill(el.connPill, 'ERROR', false);
+    } finally {
+      if (perfOn) {
+        const tickEnd = performance.now();
+        state.perf.lastTickMs = tickEnd - tickStart;
       }
     }
+  }
 
     // immediate tick + interval
     await tick();

@@ -1,163 +1,348 @@
 'use strict';
 
-// ---------- render ----------
-  function draw() {
+  let drawPending = false;
+  let lastCanvasW = 0;
+  let lastCanvasH = 0;
+  let lastCanvasDpr = 0;
+  let lastMapViewKey = '';
+  let overlayCtx = null;
+  let mapCtx = null;
+  let flowLayerCtx = null;
+  let playersLayerCtx = null;
+  let lastDrawnView = null;
+  let flowWorker = null;
+  let flowWorkerFailed = false;
+  let flowWorkerReqId = 0;
+  const flowWorkerPending = new Map();
+  let flowWorkerNoOffscreenLogged = false;
+  let flowWorkerErrorLogged = false;
+
+  function scheduleDraw() {
+    if (drawPending) return;
+    const now = performance.now();
+    if (state.interaction?.active) {
+      const fps = Number(state.interactionFpsCap || 0);
+      if (Number.isFinite(fps) && fps > 0) {
+        const minMs = 1000 / fps;
+        const last = Number(state.interactionLastDrawMs || 0);
+        if (now - last < minMs) {
+          if (!drawPending) {
+            drawPending = true;
+            const delay = Math.max(0, minMs - (now - last));
+            setTimeout(() => {
+              drawPending = false;
+              scheduleDraw();
+            }, delay);
+          }
+          return;
+        }
+      }
+    }
+    drawPending = true;
+    requestAnimationFrame(() => {
+      drawPending = false;
+      if (state.interaction?.active) {
+        state.interactionLastDrawMs = performance.now();
+      }
+      if (PERF_MODE && state?.perf?.enabled) {
+        const now = performance.now();
+        const last = state.perf.lastRafTs;
+        if (Number.isFinite(last)) {
+          state.perf.frameGapMs = now - last;
+        }
+        state.perf.lastRafTs = now;
+      }
+      draw();
+    });
+  }
+
+  function getVisibleMapBounds(cw, ch, view, pad) {
+    const zoom = Math.max(0.0001, view?.zoom || 1);
+    const panX = view?.panX || 0;
+    const panY = view?.panY || 0;
+    const left = (-panX) / zoom - pad;
+    const top = (-panY) / zoom - pad;
+    const right = (cw - panX) / zoom + pad;
+    const bottom = (ch - panY) / zoom + pad;
+    return { left, top, right, bottom };
+  }
+
+  function getMapViewKey(cw, ch, dpr, view) {
+    const z = view?.zoom ?? 1;
+    const px = view?.panX ?? 0;
+    const py = view?.panY ?? 0;
+    const iw = state.mapImg?.width ?? 0;
+    const ih = state.mapImg?.height ?? 0;
+    const bm = state.mapBitmap ? 1 : 0;
+    return `${cw}x${ch}@${dpr}|z=${z}|px=${px}|py=${py}|img=${iw}x${ih}|bm=${bm}`;
+  }
+
+  function snapCssTransform(tx, ty) {
     const dpr = window.devicePixelRatio || 1;
-    const cw = el.canvas.clientWidth;
-    const ch = el.canvas.clientHeight;
+    const snap = 1 / dpr;
+    return {
+      tx: Math.round(tx / snap) * snap,
+      ty: Math.round(ty / snap) * snap,
+    };
+  }
 
-    // Layout guard: wait until canvas has size.
-    if (cw === 0 || ch === 0) {
-      requestAnimationFrame(draw);
-      return;
+  function applyPendingInteraction() {
+    const it = state.interaction;
+    if (!it) return;
+    const prevZoom = state.view.zoom;
+    if (it.pendingPanDx || it.pendingPanDy) {
+      state.view.panX += it.pendingPanDx;
+      state.view.panY += it.pendingPanDy;
+      it.pendingPanDx = 0;
+      it.pendingPanDy = 0;
     }
+    const zf = Number(it.pendingZoomFactor || 1.0);
+    const center = it.pendingZoomCenter;
+    if (Number.isFinite(zf) && zf !== 1 && center) {
+      const mx = center.x;
+      const my = center.y;
+      const beforeX = (mx - state.view.panX) / state.view.zoom;
+      const beforeY = (my - state.view.panY) / state.view.zoom;
+      const newZoom = clamp(state.view.zoom * zf, 0.05, 30);
+      state.view.zoom = newZoom;
+      state.view.panX = mx - beforeX * newZoom;
+      state.view.panY = my - beforeY * newZoom;
+      it.pendingZoomFactor = 1.0;
+      it.pendingZoomCenter = null;
+    }
+    if (state.view.zoom !== prevZoom) {
+      const labelOn = state.view.zoom >= 0.55;
+      if (state.playersLayerLabelOn == null || state.playersLayerLabelOn !== labelOn) {
+        state.playersLayerDirty = true;
+      }
+    }
+  }
 
-    el.canvas.width = Math.floor(cw * dpr);
-    el.canvas.height = Math.floor(ch * dpr);
+  function ensureWorldZdosLayerCanvas() {
+    if (!state.mapReady || !state.mapImg) return null;
+    const w = state.mapImg.width;
+    const h = state.mapImg.height;
+    const needsNew =
+      !state.worldZdosLayerCanvas ||
+      state.worldZdosLayerCanvas.width !== w ||
+      state.worldZdosLayerCanvas.height !== h;
+    if (needsNew) {
+      const c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+      state.worldZdosLayerCanvas = c;
+      state.worldZdosLayerCtx = c.getContext('2d');
+      state.worldZdosLayerDirty = true;
+    }
+    return state.worldZdosLayerCanvas;
+  }
 
-    const ctx = el.canvas.getContext('2d');
-    if (!ctx) return;
+  function ensureFlowLayerCanvas() {
+    if (!state.mapReady || !state.mapImg) return null;
+    const w = state.mapImg.width;
+    const h = state.mapImg.height;
+    const needsNew =
+      !state.flowLayerCanvas ||
+      state.flowLayerCanvas.width !== w ||
+      state.flowLayerCanvas.height !== h;
+    if (needsNew) {
+      const c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+      state.flowLayerCanvas = c;
+      flowLayerCtx = c.getContext('2d');
+      state.flowLayerDirty = true;
+    }
+    return state.flowLayerCanvas;
+  }
 
-    // Clear
+  function rebuildWorldZdosLayer() {
+    const canvas = ensureWorldZdosLayerCanvas();
+    const ctx = state.worldZdosLayerCtx;
+    if (!canvas || !ctx) return false;
+    if (!state.worldZdosBuckets) return false;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, el.canvas.width, el.canvas.height);
-
-    // DPR scale once
-    ctx.scale(dpr, dpr);
-
-    // Map must exist to render
-    if (!state.mapReady) return;
-
-    // Apply viewport transform in CSS pixels
-    ctx.translate(state.view.panX, state.view.panY);
-    ctx.scale(state.view.zoom, state.view.zoom);
-
-    // Draw base map
-    ctx.drawImage(state.mapImg, 0, 0);
-
-    // Draw frame overlays
-    // Manual check: start viewer -> confirm fewer reds, lower opacity, toggle still works.
-    const fr = state.frame;
-    if (!fr) return;
-
-    // Layers toggles
-    const showPlayers = !!el.togPlayers?.checked;
-    const showFlow = !!el.togFlow?.checked;
-    const showWorldZdo = !!el.togWorldZdo?.checked;
-    if (!showFlow && el.flowTooltip) el.flowTooltip.style.display = 'none';
-
-    // Hotspots
-    if (showWorldZdo) {
-      const worldZdos = state.worldZdosZones || [];
-      const hotMinCount = 1;
-      const th = getWorldZdoThresholds(fr);
-
-      const drawAmpel = (entry, count, sev) => {
-        if (count < hotMinCount) return;
-        const { x, z: wz } = zoneCenterWorld(entry.zx, entry.zy);
-        const { px, py } = worldToMapPx(x, wz);
-        let col = { r: 0, g: 200, b: 83, a: 0.45 };
-        if (sev === 'red') col = { r: 213, g: 0, b: 0, a: 0.35 };
-        else if (sev === 'yellow') col = { r: 255, g: 214, b: 0, a: 0.40 };
-        const r = visuals.heatRadiusPx;
-        const g = ctx.createRadialGradient(px, py, 0, px, py, r);
-        g.addColorStop(0, `rgba(${col.r},${col.g},${col.b},${col.a})`);
-        g.addColorStop(0.55, `rgba(${col.r},${col.g},${col.b},${col.a * 0.55})`);
-        g.addColorStop(1, `rgba(${col.r},${col.g},${col.b},0)`);
-        ctx.fillStyle = g;
-        ctx.beginPath();
-        ctx.arc(px, py, r, 0, Math.PI * 2);
-        ctx.fill();
-      };
-
-      ctx.save();
-      worldZdoBuckets.green.length = 0;
-      worldZdoBuckets.yellow.length = 0;
-      worldZdoBuckets.red.length = 0;
-      for (const entry of worldZdos) {
-        if (entry?.zx == null || entry?.zy == null) continue;
-        const count = Number(entry.count ?? entry.v) || 0;
-        if (count >= th.redTh) worldZdoBuckets.red.push(entry);
-        else if (count >= th.yellowTh) worldZdoBuckets.yellow.push(entry);
-        else worldZdoBuckets.green.push(entry);
-      }
-      // Severity draw order: red > yellow > green (higher severity on top).
-      for (const entry of worldZdoBuckets.green) {
-        drawAmpel(entry, Number(entry.count ?? entry.v) || 0, 'green');
-      }
-      for (const entry of worldZdoBuckets.yellow) {
-        drawAmpel(entry, Number(entry.count ?? entry.v) || 0, 'yellow');
-      }
-      for (const entry of worldZdoBuckets.red) {
-        drawAmpel(entry, Number(entry.count ?? entry.v) || 0, 'red');
-      }
-      ctx.restore();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const r = visuals.heatRadiusPx;
+    const drawAmpel = (entry, count, sev) => {
+      if (count < 1) return;
+      const px = Number(entry.px);
+      const py = Number(entry.py);
+      if (!Number.isFinite(px) || !Number.isFinite(py)) return;
+      let col = { r: 0, g: 200, b: 83, a: 0.45 };
+      if (sev === 'red') col = { r: 213, g: 0, b: 0, a: 0.35 };
+      else if (sev === 'yellow') col = { r: 255, g: 214, b: 0, a: 0.40 };
+      const g = ctx.createRadialGradient(px, py, 0, px, py, r);
+      g.addColorStop(0, `rgba(${col.r},${col.g},${col.b},${col.a})`);
+      g.addColorStop(0.55, `rgba(${col.r},${col.g},${col.b},${col.a * 0.55})`);
+      g.addColorStop(1, `rgba(${col.r},${col.g},${col.b},0)`);
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, Math.PI * 2);
+      ctx.fill();
+    };
+    // Severity draw order: red > yellow > green (higher severity on top).
+    for (const entry of state.worldZdosBuckets.green) {
+      drawAmpel(entry, Number(entry.count ?? entry.v) || 0, 'green');
     }
-
-    // Locations overlay
-    drawLocations(ctx);
-    if (state.locationsEnabled) {
-      ctx.save();
-      ctx.fillStyle = 'rgba(255,255,255,0.7)';
-      ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
-      ctx.fillText('LOC ON', 10, 16);
-      ctx.restore();
+    for (const entry of state.worldZdosBuckets.yellow) {
+      drawAmpel(entry, Number(entry.count ?? entry.v) || 0, 'yellow');
     }
-
-    if (showFlow) drawFlow(ctx);
-    if (showPlayers) drawPlayers(ctx, fr?.players ?? []);
-
-    // overlay counter top right (show per-frame counts)
-    const c = fr?.meta?.counts || {};
-
-    // players: dedupe by name/label/id so overlay matches what we draw
-    let playersN = 0;
-    if (Array.isArray(fr?.players)) {
-      const byKey = new Map();
-      for (const p of fr.players) {
-        const key = (p?.name ?? p?.label ?? p?.player_id ?? p?.id ?? '').toString() || '__unknown__';
-        byKey.set(key, 1);
-      }
-      playersN = byKey.size;
-    } else {
-      playersN = (c.player_positions ?? 0);
+    for (const entry of state.worldZdosBuckets.red) {
+      drawAmpel(entry, Number(entry.count ?? entry.v) || 0, 'red');
     }
-
-    // flow: count transitions array length if available; otherwise fall back to meta counts
-    let flowN = 0;
-    if (Array.isArray(fr?.flow)) flowN = fr.flow.length;
-    else if (fr?.flow && Array.isArray(fr.flow.transitions)) flowN = fr.flow.transitions.length;
-    else flowN = (c.player_flow ?? 0);
-
-    const wN = (c.hotspots_world_zdos ?? state.worldZdosZones.length);
-
-    if (el.overlayTopRight) {
-      el.overlayTopRight.textContent =
-        `${state.mode}: players=${playersN} flow=${flowN} hotspots(world_zdos=${wN})`;
-    }
-    if (state.cursor) {
-      maybeUpdateDebug();
-    }
-    // location tooltip removed
+    state.worldZdosLayerDirty = false;
+    state.worldZdosLayerKey = `${state.frame?.meta?.t || ''}|hr=${r}|p90=${state.worldZdosThresholds?.p90}|p99=${state.worldZdosThresholds?.p99}`;
+    return true;
   }
 
-  function heatColorFromCount(cnt) {
-    if (!Number.isFinite(cnt)) return { r: 0, g: 220, b: 90 };
-    if (cnt < 500) return { r: 0, g: 220, b: 90 };    // green
-    if (cnt <= 1500) return { r: 255, g: 235, b: 70 }; // yellow
-    if (cnt <= 3000) return { r: 255, g: 150, b: 40 }; // orange
-    return { r: 255, g: 40, b: 40 };                   // red
+  function drawFlowLayer(ctx, segments) {
+    if (!ctx || !Array.isArray(segments) || segments.length === 0) return;
+    let maxN = 1;
+    for (const s of segments) maxN = Math.max(maxN, s.count);
+    maxN = Math.max(maxN, 1);
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+
+    for (const s of segments) {
+      if (!Number.isFinite(s.ax + s.ay + s.bx + s.by)) continue;
+      const t = clamp(Math.log(s.count + 1) / Math.log(maxN + 1), 0, 1);
+      const width = clamp(1.5 + 6.5 * t, 1.5, 8);
+      const alpha = clamp(0.55 + 0.4 * t, 0.55, 0.95);
+      const glowAlpha = clamp(0.18 + 0.25 * t, 0.18, 0.5);
+
+      // subtle glow/outline
+      ctx.strokeStyle = `rgba(255,138,0,${glowAlpha})`;
+      ctx.lineWidth = width + 3;
+      ctx.beginPath();
+      ctx.moveTo(s.ax, s.ay);
+      ctx.lineTo(s.bx, s.by);
+      ctx.stroke();
+
+      // main stroke
+      ctx.strokeStyle = `rgba(255,138,0,${alpha})`;
+      ctx.lineWidth = width;
+      ctx.beginPath();
+      ctx.moveTo(s.ax, s.ay);
+      ctx.lineTo(s.bx, s.by);
+      ctx.stroke();
+
+      // direction arrowhead
+      const ahSize = clamp(width * 2.4, 5, 14);
+      drawArrowhead(ctx, s.ax, s.ay, s.bx, s.by, ahSize, `rgba(255,138,0,${Math.min(1, alpha + 0.1)})`);
+    }
+
+    ctx.restore();
   }
 
-  function drawPlayers(ctx, arr) {
-    if (!Array.isArray(arr) || arr.length === 0) return;
+  function rebuildFlowLayer() {
+    const canvas = ensureFlowLayerCanvas();
+    if (!canvas) return false;
+    if (!flowLayerCtx) flowLayerCtx = canvas.getContext('2d');
+    if (!flowLayerCtx) return false;
+    const segments = state.flowAgg?.segments || [];
+    const scaleRaw = Number(cfg.playbackFlowScale || 0) || Number(cfg.playbackOverlayScale || 1);
+    const scale = Math.max(0.25, Math.min(1, scaleRaw));
+    const key = `${state.frame?.meta?.t || ''}|flow:${segments.length}|s=${scale}`;
+    const useWorker = state.isChromium && state.mode === 'ARCHIVE' && !!state.transport?.playing;
+    if (useWorker) {
+      const fps = Number(cfg.playbackFlowFps || cfg.playbackOverlayFps || 0);
+      if (fps > 0) {
+        const now = performance.now();
+        const minMs = 1000 / fps;
+        if (state.flowLayerBitmap && (now - (state.flowLayerLastBuildMs || 0) < minMs)) {
+          return false;
+        }
+      }
+      if (state.flowLayerKey === key && state.flowLayerBitmap) {
+        state.flowLayerDirty = false;
+        return true;
+      }
+      if (state.flowLayerPendingKey === key) return false;
+      state.flowLayerPendingKey = key;
+      state.flowLayerLastBuildMs = performance.now();
+      runFlowLayerWorker({
+        type: 'flowLayer',
+        key,
+        width: Math.max(1, Math.floor(canvas.width * scale)),
+        height: Math.max(1, Math.floor(canvas.height * scale)),
+        scale,
+        segments,
+      }).then((msg) => {
+        if (!msg || msg.type === 'flowLayerError') {
+          state.flowLayerPendingKey = null;
+          state.flowLayerDirty = true;
+          if (!flowWorkerErrorLogged) {
+            flowWorkerErrorLogged = true;
+            console.warn('[Valheim Atlas] Flow layer worker error. Falling back.');
+          }
+          scheduleDraw();
+          return;
+        }
+        if (msg.type !== 'flowLayerResult' || msg.key !== key) return;
+        if (state.flowLayerPendingKey !== key) return;
+        if (msg.bitmap) {
+          if (state.flowLayerBitmap && typeof state.flowLayerBitmap.close === 'function') {
+            state.flowLayerBitmap.close();
+          }
+          state.flowLayerBitmap = msg.bitmap;
+          state.flowLayerKey = key;
+          state.flowLayerDirty = false;
+          state.flowLayerPendingKey = null;
+          scheduleDraw();
+        } else {
+          // Keep previous bitmap to avoid flicker if worker didn't return a new one.
+          state.flowLayerPendingKey = null;
+          state.flowLayerDirty = false;
+          scheduleDraw();
+        }
+      });
+      return false;
+    }
+    if (state.flowLayerBitmap && typeof state.flowLayerBitmap.close === 'function') {
+      state.flowLayerBitmap.close();
+    }
+    state.flowLayerBitmap = null;
+    state.flowLayerPendingKey = null;
+    state.flowLayerLastBuildMs = 0;
+    flowLayerCtx.setTransform(1, 0, 0, 1, 0, 0);
+    flowLayerCtx.clearRect(0, 0, canvas.width, canvas.height);
+    drawFlowLayer(flowLayerCtx, segments);
+    state.flowLayerDirty = false;
+    state.flowLayerKey = key;
+    return true;
+  }
 
+  function ensurePlayersLayerCanvas() {
+    if (!state.mapReady || !state.mapImg) return null;
+    const w = state.mapImg.width;
+    const h = state.mapImg.height;
+    const needsNew =
+      !state.playersLayerCanvas ||
+      state.playersLayerCanvas.width !== w ||
+      state.playersLayerCanvas.height !== h;
+    if (needsNew) {
+      const c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+      state.playersLayerCanvas = c;
+      playersLayerCtx = c.getContext('2d');
+      state.playersLayerDirty = true;
+    }
+    return state.playersLayerCanvas;
+  }
+
+  function drawPlayersLayer(ctx, arr) {
+    if (!Array.isArray(arr) || arr.length === 0 || !ctx) return;
     const byKey = new Map();
     for (const p of arr) {
       const key = (p?.name ?? p?.label ?? p?.id ?? p?.pfid ?? '').toString() || '__unknown__';
       byKey.set(key, p);
     }
-
     ctx.save();
     ctx.globalAlpha = 0.95;
 
@@ -194,7 +379,7 @@
       ctx.stroke();
 
       if (name && state.view.zoom >= 0.55) {
-        ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
+        ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", monospace';
         ctx.textBaseline = 'middle';
         ctx.fillStyle = 'rgba(0,0,0,0.55)';
         ctx.fillText(name, px + 11, py + 1);
@@ -204,6 +389,457 @@
     }
     ctx.restore();
   }
+
+  function rebuildPlayersLayer() {
+    const canvas = ensurePlayersLayerCanvas();
+    if (!canvas) return false;
+    if (!playersLayerCtx) playersLayerCtx = canvas.getContext('2d');
+    if (!playersLayerCtx) return false;
+    const players = Array.isArray(state.frame?.players) ? state.frame.players : [];
+    const labelOn = state.view.zoom >= 0.55;
+    const scaleRaw = Number(cfg.playbackPlayersScale || 0) || Number(cfg.playbackOverlayScale || 1);
+    const scale = Math.max(0.25, Math.min(1, scaleRaw));
+    const key = `${state.frame?.meta?.t || ''}|players:${players.length}|z=${labelOn}|s=${scale}`;
+    const now = performance.now();
+    const useWorker = state.isChromium && state.mode === 'ARCHIVE' && !!state.transport?.playing;
+    if (useWorker) {
+      const fps = Number(cfg.playbackPlayersFps || cfg.playbackOverlayFps || 0);
+      if (fps > 0) {
+        const minMs = 1000 / fps;
+        if (state.playersLayerBitmap && (now - (state.playersLayerLastBuildMs || 0) < minMs)) {
+          return false;
+        }
+      }
+      if (state.playersLayerKey === key && state.playersLayerBitmap) {
+        state.playersLayerDirty = false;
+        return true;
+      }
+      if (state.playersLayerPendingKey && state.playersLayerPendingKey !== key) {
+        state.playersLayerPendingKey = null;
+        state.playersLayerPendingAt = 0;
+      }
+      if (state.playersLayerPendingKey === key) {
+        if (state.playersLayerPendingAt && (now - state.playersLayerPendingAt > 600)) {
+          state.playersLayerPendingKey = null;
+          state.playersLayerPendingAt = 0;
+        } else {
+          return false;
+        }
+      }
+      state.playersLayerPendingKey = key;
+      state.playersLayerPendingAt = now;
+      state.playersLayerLastBuildMs = performance.now();
+      runPlayersLayerWorker({
+        type: 'playersLayer',
+        key,
+        players,
+        scale,
+        mapCal: {
+          mapCxPx: state.mapCal.mapCxPx,
+          mapCyPx: state.mapCal.mapCyPx,
+          mapRadiusPx: state.mapCal.mapRadiusPx,
+          worldRadius: state.mapCal.worldRadius,
+          offsetXPx: state.mapCal.offsetXPx,
+          offsetYPx: state.mapCal.offsetYPx,
+        },
+        width: Math.max(1, Math.floor(canvas.width * scale)),
+        height: Math.max(1, Math.floor(canvas.height * scale)),
+        labelOn,
+      }).then((msg) => {
+        if (!msg || msg.type === 'playersLayerError') {
+          state.playersLayerPendingKey = null;
+          state.playersLayerPendingAt = 0;
+          state.playersLayerDirty = true;
+          if (!flowWorkerErrorLogged) {
+            flowWorkerErrorLogged = true;
+            console.warn('[Valheim Atlas] Players layer worker error. Falling back.');
+          }
+          scheduleDraw();
+          return;
+        }
+        if (msg.type !== 'playersLayerResult' || msg.key !== key) return;
+        if (state.playersLayerPendingKey !== key) return;
+        if (msg.bitmap) {
+          if (state.playersLayerBitmap && typeof state.playersLayerBitmap.close === 'function') {
+            state.playersLayerBitmap.close();
+          }
+          state.playersLayerBitmap = msg.bitmap;
+          state.playersLayerKey = key;
+          state.playersLayerLabelOn = labelOn;
+          state.playersLayerDirty = false;
+          state.playersLayerPendingKey = null;
+          state.playersLayerPendingAt = 0;
+          scheduleDraw();
+        } else {
+          // Keep previous bitmap to avoid flicker if worker didn't return a new one.
+          state.playersLayerPendingKey = null;
+          state.playersLayerPendingAt = 0;
+          state.playersLayerDirty = false;
+          scheduleDraw();
+        }
+      });
+      return false;
+    }
+    if (state.playersLayerBitmap && typeof state.playersLayerBitmap.close === 'function') {
+      state.playersLayerBitmap.close();
+    }
+    state.playersLayerBitmap = null;
+    state.playersLayerPendingKey = null;
+    state.playersLayerLastBuildMs = 0;
+    playersLayerCtx.setTransform(1, 0, 0, 1, 0, 0);
+    playersLayerCtx.clearRect(0, 0, canvas.width, canvas.height);
+    drawPlayersLayer(playersLayerCtx, players);
+    state.playersLayerDirty = false;
+    state.playersLayerLabelOn = labelOn;
+    state.playersLayerKey = key;
+    return true;
+  }
+
+// ---------- render ----------
+  function draw() {
+    const perfOn = PERF_MODE && state?.perf?.enabled;
+    const t0 = perfOn ? performance.now() : 0;
+    applyPendingInteraction();
+
+    const deviceDpr = window.devicePixelRatio || 1;
+    const freezeRaster = state.interaction?.active && state.interactionTransform;
+    let dpr = deviceDpr;
+    if (!freezeRaster && state.interaction?.active) {
+      const cap = Number(state.interactionDprCap || 1.0);
+      if (Number.isFinite(cap) && cap > 0) dpr = Math.min(dpr, cap);
+    }
+    if (freezeRaster && lastCanvasDpr) {
+      dpr = lastCanvasDpr;
+    }
+    const overlayCanvas = el.canvas;
+    const mapCanvas = el.mapCanvas || el.canvas;
+    const cw = overlayCanvas.clientWidth;
+    const ch = overlayCanvas.clientHeight;
+
+    // Layout guard: wait until canvas has size.
+    if (cw === 0 || ch === 0) {
+      requestAnimationFrame(draw);
+      return;
+    }
+
+    let nextW = Math.floor(cw * dpr);
+    let nextH = Math.floor(ch * dpr);
+    const canResize = !freezeRaster || lastCanvasW === 0 || lastCanvasH === 0;
+    if (!canResize) {
+      nextW = lastCanvasW;
+      nextH = lastCanvasH;
+    }
+    if ((nextW !== lastCanvasW || nextH !== lastCanvasH || dpr !== lastCanvasDpr) && canResize) {
+      overlayCanvas.width = nextW;
+      overlayCanvas.height = nextH;
+      if (mapCanvas) {
+        mapCanvas.width = nextW;
+        mapCanvas.height = nextH;
+      }
+      lastCanvasW = nextW;
+      lastCanvasH = nextH;
+      lastCanvasDpr = dpr;
+    }
+
+    if (!overlayCtx) {
+      try {
+        overlayCtx = overlayCanvas.getContext('2d', { alpha: true, desynchronized: true });
+      } catch {
+        overlayCtx = overlayCanvas.getContext('2d');
+      }
+    }
+    const ctx = overlayCtx;
+    if (!ctx) return;
+    if (mapCanvas && !mapCtx) {
+      try {
+        mapCtx = mapCanvas.getContext('2d', { alpha: false, desynchronized: true });
+      } catch {
+        mapCtx = mapCanvas.getContext('2d');
+      }
+    }
+
+    // Map must exist to render
+    if (!state.mapReady) return;
+
+    const tSetup = perfOn ? performance.now() : 0;
+    const holdBg = 'rgba(52, 62, 72, 1)';
+    const idleBg = '#05070a';
+
+    // Draw base map on its own canvas only when view changes.
+    if (mapCtx) {
+      const key = getMapViewKey(cw, ch, dpr, state.view);
+      let shouldDrawMap = key !== lastMapViewKey;
+      let throttled = false;
+      if (state.interaction?.active) {
+        const fps = Number(state.interactionMapFps || 0);
+        if (fps > 0) {
+          const now = performance.now();
+          const minMs = 1000 / fps;
+          if (now - (state.interactionLastMapDrawMs || 0) < minMs) {
+            shouldDrawMap = false;
+            throttled = true;
+          } else {
+            state.interactionLastMapDrawMs = now;
+          }
+        }
+      } else {
+        state.interactionLastMapDrawMs = 0;
+      }
+      if (!shouldDrawMap && state.interaction?.active && state.interactionTransform && lastDrawnView) {
+        const ratio = state.view.zoom / lastDrawnView.zoom;
+        let tx = state.view.panX - ratio * lastDrawnView.panX;
+        let ty = state.view.panY - ratio * lastDrawnView.panY;
+        ({ tx, ty } = snapCssTransform(tx, ty));
+        const m = `matrix(${ratio},0,0,${ratio},${tx},${ty})`;
+        mapCanvas.style.transformOrigin = '0 0';
+        overlayCanvas.style.transformOrigin = '0 0';
+        mapCanvas.style.transform = m;
+        overlayCanvas.style.transform = m;
+        mapCanvas.style.backgroundColor = holdBg;
+        if (perfOn) {
+          const tEnd = performance.now();
+          state.perf.last = {
+            total: tEnd - t0,
+            setup: 0,
+            map: 0,
+            hotspots: 0,
+            flow: 0,
+            players: 0,
+            ui: 0,
+          };
+        }
+        return;
+      }
+      if (shouldDrawMap) {
+        mapCtx.setTransform(1, 0, 0, 1, 0, 0);
+        mapCtx.clearRect(0, 0, mapCanvas.width, mapCanvas.height);
+        mapCtx.scale(dpr, dpr);
+        mapCtx.translate(state.view.panX, state.view.panY);
+        mapCtx.scale(state.view.zoom, state.view.zoom);
+        const src = state.mapBitmap || state.mapImg;
+        if (src) mapCtx.drawImage(src, 0, 0);
+        lastMapViewKey = key;
+        mapCanvas.style.transform = '';
+        state.interactionHoldView = null;
+        overlayCanvas.style.transform = '';
+        lastDrawnView = {
+          panX: state.view.panX,
+          panY: state.view.panY,
+          zoom: state.view.zoom,
+        };
+        mapCanvas.style.backgroundColor = idleBg;
+      } else if (throttled && state.interaction?.active) {
+        // Keep overlays in lockstep with the map by transforming both canvases from last drawn view.
+        if (lastDrawnView) {
+          const ratio = state.view.zoom / lastDrawnView.zoom;
+          let tx = state.view.panX - ratio * lastDrawnView.panX;
+          let ty = state.view.panY - ratio * lastDrawnView.panY;
+          ({ tx, ty } = snapCssTransform(tx, ty));
+          const m = `matrix(${ratio},0,0,${ratio},${tx},${ty})`;
+          mapCanvas.style.transformOrigin = '0 0';
+          overlayCanvas.style.transformOrigin = '0 0';
+          mapCanvas.style.transform = m;
+          overlayCanvas.style.transform = m;
+        }
+        mapCanvas.style.backgroundColor = holdBg;
+        if (perfOn) {
+          const tEnd = performance.now();
+          state.perf.last = {
+            total: tEnd - t0,
+            setup: 0,
+            map: 0,
+            hotspots: 0,
+            flow: 0,
+            players: 0,
+            ui: 0,
+          };
+        }
+        return;
+      }
+    }
+
+    // Clear overlays after throttling decision
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+    // DPR scale once
+    ctx.scale(dpr, dpr);
+
+    // Apply viewport transform in CSS pixels (overlays)
+    ctx.translate(state.view.panX, state.view.panY);
+    ctx.scale(state.view.zoom, state.view.zoom);
+
+    const tMap = perfOn ? performance.now() : 0;
+
+    // Draw frame overlays
+    // Manual check: start viewer -> confirm fewer reds, lower opacity, toggle still works.
+    const fr = state.frame;
+    if (!fr) return;
+
+    // Layers toggles
+    const showPlayers = !!el.togPlayers?.checked;
+    const showFlow = !!el.togFlow?.checked;
+    const showWorldZdo = !!el.togWorldZdo?.checked;
+    if (!showFlow && el.flowTooltip) el.flowTooltip.style.display = 'none';
+
+    // Hotspots
+    if (showWorldZdo) {
+      if (state.worldZdosLayerDirty) {
+        rebuildWorldZdosLayer();
+      }
+      const layer = state.worldZdosLayerCanvas;
+      if (layer) {
+        ctx.save();
+        ctx.drawImage(layer, 0, 0);
+        ctx.restore();
+      }
+    }
+
+    const tHot = perfOn ? performance.now() : 0;
+
+    // Locations overlay
+    drawLocations(ctx);
+    if (state.locationsEnabled) {
+      ctx.save();
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
+      ctx.fillText('LOC ON', 10, 16);
+      ctx.restore();
+    }
+
+    if (showFlow) {
+      if (state.flowLayerDirty) {
+        rebuildFlowLayer();
+      }
+      const useWorker = state.isChromium && state.mode === 'ARCHIVE' && !!state.transport?.playing;
+      const bitmap = useWorker ? state.flowLayerBitmap : null;
+      if (bitmap) {
+        const mapW = state.mapImg?.width || bitmap.width;
+        const mapH = state.mapImg?.height || bitmap.height;
+        ctx.save();
+        ctx.drawImage(bitmap, 0, 0, mapW, mapH);
+        ctx.restore();
+      } else {
+        const layer = state.flowLayerCanvas;
+        if (layer) {
+          ctx.save();
+          ctx.drawImage(layer, 0, 0);
+          ctx.restore();
+        } else {
+          drawFlowLayer(ctx, state.flowAgg?.segments || []);
+        }
+      }
+      updateFlowTooltip(state.flowAgg?.segments || []);
+    } else {
+      if (el.flowTooltip) el.flowTooltip.style.display = 'none';
+    }
+    const tFlow = perfOn ? performance.now() : 0;
+    if (showPlayers) {
+      if (state.playersLayerDirty) {
+        rebuildPlayersLayer();
+      }
+      const useWorker = state.isChromium && state.mode === 'ARCHIVE' && !!state.transport?.playing;
+      const bitmap = useWorker ? state.playersLayerBitmap : null;
+      if (bitmap) {
+        const mapW = state.mapImg?.width || bitmap.width;
+        const mapH = state.mapImg?.height || bitmap.height;
+        ctx.save();
+        ctx.drawImage(bitmap, 0, 0, mapW, mapH);
+        ctx.restore();
+      } else {
+        const layer = state.playersLayerCanvas;
+        if (layer) {
+          ctx.save();
+          ctx.drawImage(layer, 0, 0);
+          ctx.restore();
+        } else {
+          drawPlayersLayer(ctx, fr?.players ?? []);
+        }
+      }
+    }
+    const tPlayers = perfOn ? performance.now() : 0;
+
+    // overlay counter top right (show per-frame counts)
+    const c = fr?.meta?.counts || {};
+
+    // players: match the player list filtering (exclude spawn ghost)
+    let playersN = 0;
+    if (Array.isArray(fr?.players)) {
+      const byKey = new Map();
+      for (const p of fr.players) {
+        if (!p || typeof p !== 'object') continue;
+        const name = (p?.name ?? '').toString().trim();
+        const id = (p?.id ?? '').toString().trim();
+        const uid = p?.uid ?? p?.player_id ?? p?.playerId ?? null;
+        const uidStr = uid != null ? String(uid).trim() : '';
+        const label = name || id || 'uid:unknown';
+        const ghost =
+          uid === 0 || uidStr === '0' ||
+          ((!name && !id) && (uid === 0 || uidStr === '0')) ||
+          label === 'uid:0';
+        if (ghost) continue;
+        const key = label || '__unknown__';
+        byKey.set(key, 1);
+      }
+      playersN = byKey.size;
+    } else {
+      playersN = (c.player_positions ?? 0);
+    }
+
+    // flow: count transitions array length if available; otherwise fall back to meta counts
+    let flowN = 0;
+    if (Array.isArray(fr?.flow)) flowN = fr.flow.length;
+    else if (fr?.flow && Array.isArray(fr.flow.transitions)) flowN = fr.flow.transitions.length;
+    else flowN = (c.player_flow ?? 0);
+
+    const wN = (c.hotspots_world_zdos ?? state.worldZdosZones.length);
+
+    if (el.overlayTopRight) {
+      el.overlayTopRight.textContent =
+        `${state.mode}: players=${playersN} flow=${flowN} hotspots(world_zdos=${wN})`;
+    }
+    if (state.cursor) {
+      maybeUpdateDebug();
+    }
+    // location tooltip removed
+
+    if (perfOn) {
+      const tEnd = performance.now();
+      const setup = tSetup - t0;
+      const map = tMap - tSetup;
+      const hotspots = tHot - tMap;
+      const flow = tFlow - tHot;
+      const players = tPlayers - tFlow;
+      const ui = tEnd - tPlayers;
+      if (performance?.memory?.usedJSHeapSize) {
+        const heapMb = performance.memory.usedJSHeapSize / (1024 * 1024);
+        const lastMb = state.perf.lastHeapMb;
+        state.perf.lastHeapMb = heapMb;
+        if (Number.isFinite(lastMb)) {
+          state.perf.heapDeltaMb = heapMb - lastMb;
+        }
+      }
+      state.perf.last = {
+        total: tEnd - t0,
+        setup,
+        map,
+        hotspots,
+        flow,
+        players,
+        ui,
+      };
+    }
+  }
+
+  function heatColorFromCount(cnt) {
+    if (!Number.isFinite(cnt)) return { r: 0, g: 220, b: 90 };
+    if (cnt < 500) return { r: 0, g: 220, b: 90 };    // green
+    if (cnt <= 1500) return { r: 255, g: 235, b: 70 }; // yellow
+    if (cnt <= 3000) return { r: 255, g: 150, b: 40 }; // orange
+    return { r: 255, g: 40, b: 40 };                   // red
+  }
+
+  // drawPlayers moved to drawPlayersLayer + cached canvas
 
 
   function getFlowTransitionsFromFrame(fr) {
@@ -246,6 +882,109 @@
     const out = [];
     for (let i = startIdx; i <= endIdx; i++) out.push(i);
     return out;
+  }
+
+  function ensureFlowWorker() {
+    if (flowWorker || flowWorkerFailed) return flowWorker;
+    if (!state?.isChromium || typeof Worker === 'undefined') return null;
+    if (typeof OffscreenCanvas === 'undefined' || typeof OffscreenCanvas.prototype?.transferToImageBitmap !== 'function') {
+      flowWorkerFailed = true;
+      if (!flowWorkerNoOffscreenLogged) {
+        flowWorkerNoOffscreenLogged = true;
+        console.info('[Valheim Atlas] Worker offload disabled: OffscreenCanvas not supported.');
+      }
+      return null;
+    }
+    try {
+      flowWorker = new Worker('./viewer.decode.worker.js');
+      flowWorker.onmessage = (ev) => {
+        const msg = ev?.data;
+        const id = msg?.id;
+        if (!id) return;
+        const resolve = flowWorkerPending.get(id);
+        if (!resolve) return;
+        flowWorkerPending.delete(id);
+        resolve(msg);
+      };
+      flowWorker.onerror = () => {
+        flowWorkerFailed = true;
+        if (!flowWorkerErrorLogged) {
+          flowWorkerErrorLogged = true;
+          console.warn('[Valheim Atlas] Worker offload disabled: worker error.');
+        }
+        try { flowWorker.terminate(); } catch {}
+        flowWorker = null;
+        for (const resolve of flowWorkerPending.values()) resolve(null);
+        flowWorkerPending.clear();
+      };
+    } catch {
+      flowWorkerFailed = true;
+      flowWorker = null;
+    }
+    return flowWorker;
+  }
+
+  function runFlowAggWorker(payload) {
+    return new Promise((resolve) => {
+      const worker = ensureFlowWorker();
+      if (!worker) return resolve(null);
+      const id = ++flowWorkerReqId;
+      payload.id = id;
+      flowWorkerPending.set(id, resolve);
+      worker.postMessage(payload);
+    });
+  }
+
+  function runPlayersLayerWorker(payload) {
+    return new Promise((resolve) => {
+      const worker = ensureFlowWorker();
+      if (!worker) return resolve(null);
+      const id = ++flowWorkerReqId;
+      payload.id = id;
+      flowWorkerPending.set(id, resolve);
+      worker.postMessage(payload);
+    });
+  }
+
+  function runFlowLayerWorker(payload) {
+    return new Promise((resolve) => {
+      const worker = ensureFlowWorker();
+      if (!worker) return resolve(null);
+      const id = ++flowWorkerReqId;
+      payload.id = id;
+      flowWorkerPending.set(id, resolve);
+      worker.postMessage(payload);
+    });
+  }
+
+  function runParseFrameWorker(payload) {
+    return new Promise((resolve) => {
+      const worker = ensureFlowWorker();
+      if (!worker) return resolve(null);
+      const id = ++flowWorkerReqId;
+      payload.id = id;
+      flowWorkerPending.set(id, resolve);
+      worker.postMessage(payload);
+    });
+  }
+
+  function runUnionBucketsWorker(payload) {
+    return new Promise((resolve) => {
+      const worker = ensureFlowWorker();
+      if (!worker) return resolve(null);
+      const id = ++flowWorkerReqId;
+      payload.id = id;
+      flowWorkerPending.set(id, resolve);
+      worker.postMessage(payload);
+    });
+  }
+
+  async function parseFrameTextInWorker(text, key) {
+    const msg = await runParseFrameWorker({ type: 'parseFrame', key, text });
+    if (msg && msg.type === 'parseFrameResult' && msg.key === key && msg.frame) {
+      return msg.frame;
+    }
+    return null;
   }
 
   function clusterFlowEdges(edges) {
@@ -332,6 +1071,8 @@
   async function buildFlowAggregation() {
     if (state.flowAggBuilding) return;
     state.flowAggBuilding = true;
+    const perfOn = PERF_MODE && state?.perf?.enabled;
+    const t0 = perfOn ? performance.now() : 0;
     const wasDirty = state.flowAggDirty;
     try {
       if (!el.togFlow?.checked) {
@@ -368,6 +1109,42 @@
       }
       if (frames.length === 0 && state.frame) {
         frames.push({ idx: state.selectedFrameIdx ?? -1, fr: state.frame });
+      }
+
+      const useWorker = state.isChromium && state.mode === 'ARCHIVE' && !!state.transport?.playing;
+      if (useWorker) {
+        const payloadFrames = frames.map((it) => ({
+          idx: it.idx,
+          players: Array.isArray(it.fr?.players) ? it.fr.players : [],
+          flow: it.fr?.flow ?? null,
+        }));
+        const workerRes = await runFlowAggWorker({
+          type: 'flowAgg',
+          key,
+          windowLabel,
+          frames: payloadFrames,
+          flowMin: Number(cfg.flowMinC || 1),
+          flowMax: Math.max(0, Math.floor(Number(cfg.flowMaxEdges || 180))),
+          zoneSize: Number(cfg.zoneSize || 64),
+          mapCal: {
+            mapCxPx: state.mapCal.mapCxPx,
+            mapCyPx: state.mapCal.mapCyPx,
+            mapRadiusPx: state.mapCal.mapRadiusPx,
+            worldRadius: state.mapCal.worldRadius,
+            offsetXPx: state.mapCal.offsetXPx,
+            offsetYPx: state.mapCal.offsetYPx,
+          },
+        });
+        if (workerRes && workerRes.type === 'flowAggResult' && workerRes.key === key) {
+          state.flowAgg = {
+            segments: Array.isArray(workerRes.segments) ? workerRes.segments : [],
+            clusters: Array.isArray(workerRes.clusters) ? workerRes.clusters : [],
+            windowLabel,
+          };
+          state.flowAggDirty = false;
+          state.flowLayerDirty = true;
+          return;
+        }
       }
 
       const edgeMap = new Map();
@@ -485,8 +1262,13 @@
 
       state.flowAgg = { segments, clusters, windowLabel };
       state.flowAggDirty = false;
+      state.flowLayerDirty = true;
     } finally {
       state.flowAggBuilding = false;
+      if (perfOn) {
+        const t1 = performance.now();
+        state.perf.lastFlowAgg = { ms: t1 - t0 };
+      }
       if (state.flowAggDirty) scheduleFlowRebuild();
     }
   }
@@ -497,7 +1279,7 @@
     if (state.flowRebuildTimer) return;
     state.flowRebuildTimer = setTimeout(() => {
       state.flowRebuildTimer = null;
-      buildFlowAggregation().then(() => draw());
+      buildFlowAggregation().then(() => scheduleDraw());
     }, 100);
   }
 
@@ -568,60 +1350,13 @@
     return Array.from(names.values());
   }
 
-  function drawFlow(ctx) {
-    const segments = state.flowAgg?.segments || [];
-    if (!Array.isArray(segments) || segments.length === 0) {
-      if (el.flowTooltip) el.flowTooltip.style.display = 'none';
-      return;
-    }
-
-    let maxN = 1;
-    for (const s of segments) maxN = Math.max(maxN, s.count);
-    maxN = Math.max(maxN, 1);
-
-    ctx.save();
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.setLineDash([]);
-    ctx.globalAlpha = 1;
-
-    for (const s of segments) {
-      if (!Number.isFinite(s.ax + s.ay + s.bx + s.by)) continue;
-      const t = clamp(Math.log(s.count + 1) / Math.log(maxN + 1), 0, 1);
-      const width = clamp(1.5 + 6.5 * t, 1.5, 8);
-      const alpha = clamp(0.55 + 0.4 * t, 0.55, 0.95);
-      const glowAlpha = clamp(0.18 + 0.25 * t, 0.18, 0.5);
-
-      // subtle glow/outline
-      ctx.strokeStyle = `rgba(255,138,0,${glowAlpha})`;
-      ctx.lineWidth = width + 3;
-      ctx.beginPath();
-      ctx.moveTo(s.ax, s.ay);
-      ctx.lineTo(s.bx, s.by);
-      ctx.stroke();
-
-      // main stroke
-      ctx.strokeStyle = `rgba(255,138,0,${alpha})`;
-      ctx.lineWidth = width;
-      ctx.beginPath();
-      ctx.moveTo(s.ax, s.ay);
-      ctx.lineTo(s.bx, s.by);
-      ctx.stroke();
-
-      // direction arrowhead
-      const ahSize = clamp(width * 2.4, 5, 14);
-      drawArrowhead(ctx, s.ax, s.ay, s.bx, s.by, ahSize, `rgba(255,138,0,${Math.min(1, alpha + 0.1)})`);
-    }
-
-    ctx.restore();
-
+  function updateFlowTooltip(segments) {
     if (!state.cursor || !el.flowTooltip) return;
     const mapPt = screenToMapPx(state.cursor.x, state.cursor.y);
     if (!mapPt) {
       el.flowTooltip.style.display = 'none';
       return;
     }
-
     const hitDist = 6 / Math.max(0.2, state.view.zoom);
     let best = null;
     let bestD = hitDist;
@@ -632,12 +1367,10 @@
         best = s;
       }
     }
-
     if (!best) {
       el.flowTooltip.style.display = 'none';
       return;
     }
-
     let nameLine = '';
     if (best.names && best.names.length > 0) {
       nameLine = `Players: ${best.names.join(', ')}`;
@@ -647,7 +1380,6 @@
         nameLine = `Players near segment (heuristic): ${heuristic.join(', ')}`;
       }
     }
-
     const aWorld = zoneCenterWorld(best.repr.fx, best.repr.fy);
     const bWorld = zoneCenterWorld(best.repr.tx, best.repr.ty);
     el.flowTooltip.textContent =

@@ -3,6 +3,8 @@
   const $ = (id) => document.getElementById(id);
 
   const el = {
+    main: $('main'),
+    mapCanvas: $('mapCanvas'),
     canvas: $('canvas'),
     overlayTopRight: $('overlayTopRight'),
     modePill: $('modePill'),
@@ -59,23 +61,53 @@
 
   const WORLD_RADIUS = 10000;
 
+  const isChromium = /Chrome|Chromium|Edg|OPR|Brave/i.test(navigator.userAgent || '')
+    && !/Firefox/i.test(navigator.userAgent || '');
+  const chromeDefaults = {
+    flowMaxEdges: 120,
+    archiveBufferSize: 75,
+    archivePrefetchMin: 10,
+    unionN: 2,
+    unionTopN: 250,
+    iqDpr: 1.0,
+    iqRestore: 160,
+    iqFps: 0,
+    iqHold: '0',
+    iqMapFps: 30,
+    iqTransform: '1',
+  };
+  const nonChromiumDefaults = {
+    iqDpr: 1.0,
+    iqRestore: 0,
+    iqFps: 0,
+    iqHold: '0',
+    iqMapFps: 0,
+    iqTransform: '0',
+  };
+
   const cfg = {
     worldRadius: WORLD_RADIUS,
     worldWidth: WORLD_RADIUS * 2,
     zoneSize: 64,
     pollMs: 1000,
-    flowMaxEdges: Number(qp.get('flowMax') || 180),
+    flowMaxEdges: Number(qp.get('flowMax') || (isChromium ? chromeDefaults.flowMaxEdges : 180)),
     flowMinC: Number(qp.get('flowMin') || 1),
     manifestUrl: (qp.get('manifest') || 'manifest.json'),
     frameLiveUrl: (qp.get('live') || 'frame_live.json'),
     framesDir: (qp.get('frames') || 'frames'),
     // Frame buffer + union window params (query overrides)
-    archiveBufferSize: Number(qp.get('archiveBuffer') || 120),
-    archivePrefetchMin: Number(qp.get('archivePrefetch') || 20),
+    archiveBufferSize: Number(qp.get('archiveBuffer') || (isChromium ? chromeDefaults.archiveBufferSize : 120)),
+    archivePrefetchMin: Number(qp.get('archivePrefetch') || (isChromium ? chromeDefaults.archivePrefetchMin : 20)),
     liveRingSize: Number(qp.get('liveRing') || 30),
     unionEnabled: (qp.get('union') || '1') !== '0',
-    unionN: Number(qp.get('unionN') || 5),
-    unionTopN: Number(qp.get('unionTopN') || 500),
+    unionN: Number(qp.get('unionN') || (isChromium ? chromeDefaults.unionN : 5)),
+    unionTopN: Number(qp.get('unionTopN') || (isChromium ? chromeDefaults.unionTopN : 500)),
+    playbackOverlayFps: Number(qp.get('playOverlayFps') || 28),
+    playbackFlowFps: Number(qp.get('playFlowFps') || 0),
+    playbackPlayersFps: Number(qp.get('playPlayersFps') || 0),
+    playbackOverlayScale: Number(qp.get('playOverlayScale') || 0.7),
+    playbackFlowScale: Number(qp.get('playFlowScale') || 0),
+    playbackPlayersScale: Number(qp.get('playPlayersScale') || 0),
   };
 
   const visuals = {
@@ -97,6 +129,7 @@
   const LOCKED_BIOME_UV = { zSign: -1 };
   const DEBUG_ZONE_MATCH = qp.get('debugZones') === '1';
   const DIAG_MODE = qp.get('diag') === '1';
+  const PERF_MODE = qp.get('perf') === '1';
 
   const state = {
     mode: 'LIVE',               // LIVE | ARCHIVE
@@ -110,6 +143,7 @@
     frames: [],                 // available frames [{sec, url}]
     view: { zoom: 1.0, panX: 0, panY: 0 },
     mapImg: null,
+    mapBitmap: null,
     mapReady: false,
     dragging: false,
     dragLast: { x: 0, y: 0 },
@@ -119,6 +153,7 @@
     lastManifestRefresh: 0,
     manifestUrlResolved: null,
     manifestBaseUrl: null,
+    isChromium,
     debugEnabled: true,
     cursor: null,
     cursorSeq: 0,
@@ -159,6 +194,49 @@
     worldZdosByZone: new Map(),
     worldZdosZones: [],
     worldZdosAvailable: false,
+    worldZdosBuckets: null,
+    worldZdosThresholds: null,
+    worldZdosLayerCanvas: null,
+    worldZdosLayerCtx: null,
+    worldZdosLayerKey: null,
+    worldZdosLayerDirty: true,
+    flowLayerCanvas: null,
+    flowLayerCtx: null,
+    flowLayerKey: null,
+    flowLayerDirty: true,
+    flowLayerBitmap: null,
+    flowLayerPendingKey: null,
+    flowLayerLastBuildMs: 0,
+    playersLayerCanvas: null,
+    playersLayerCtx: null,
+    playersLayerKey: null,
+    playersLayerDirty: true,
+    playersLayerLabelOn: null,
+    playersLayerBitmap: null,
+    playersLayerPendingKey: null,
+    playersLayerPendingAt: 0,
+    playersLayerLastBuildMs: 0,
+    playersLayerHoldDuringInteraction: false,
+    followPlayer: null,
+    interaction: {
+      active: false,
+      lastAtMs: 0,
+      restoreTimer: null,
+      pendingPanDx: 0,
+      pendingPanDy: 0,
+      pendingZoomFactor: 1.0,
+      pendingZoomCenter: null,
+    },
+    interactionDprCap: Number(qp.get('iqDpr') || (isChromium ? chromeDefaults.iqDpr : nonChromiumDefaults.iqDpr)),
+    interactionRestoreMs: Number(qp.get('iqRestore') || (isChromium ? chromeDefaults.iqRestore : nonChromiumDefaults.iqRestore)),
+    interactionFpsCap: Number(qp.get('iqFps') || (isChromium ? chromeDefaults.iqFps : nonChromiumDefaults.iqFps)),
+    interactionLastDrawMs: 0,
+    interactionRasterHold: (qp.get('iqHold') || (isChromium ? chromeDefaults.iqHold : nonChromiumDefaults.iqHold)) !== '0',
+    interactionHoldView: null,
+    interactionMapFps: Number(qp.get('iqMapFps') || (isChromium ? chromeDefaults.iqMapFps : nonChromiumDefaults.iqMapFps)),
+    interactionLastMapDrawMs: 0,
+    interactionTransform: (qp.get('iqTransform') || (isChromium ? chromeDefaults.iqTransform : nonChromiumDefaults.iqTransform)) === '1',
+    perf: { enabled: PERF_MODE, last: null },
     userScrubbing: false,
     archiveWindow: { start: 0, end: -1 },
     archivePrefetchRunning: false,
@@ -409,9 +487,28 @@
 
   async function fetchJson(url, cacheBust = false) {
     const u = cacheBust ? `${url}${url.includes('?') ? '&' : '?'}t=${Date.now()}` : url;
+    const t0 = PERF_MODE ? performance.now() : 0;
     const res = await fetch(u, { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-    return await res.json();
+    const data = await res.json();
+    if (PERF_MODE && state?.perf?.enabled) {
+      const t1 = performance.now();
+      state.perf.lastFetch = { ms: t1 - t0, url: u };
+    }
+    return data;
+  }
+
+  async function fetchJsonText(url, cacheBust = false) {
+    const u = cacheBust ? `${url}${url.includes('?') ? '&' : '?'}t=${Date.now()}` : url;
+    const t0 = PERF_MODE ? performance.now() : 0;
+    const res = await fetch(u, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    const text = await res.text();
+    if (PERF_MODE && state?.perf?.enabled) {
+      const t1 = performance.now();
+      state.perf.lastFetch = { ms: t1 - t0, url: u };
+    }
+    return { text, url: u };
   }
 
   function setPill(node, text, ok = true) {
@@ -1110,6 +1207,41 @@
       }
       const t = state.transport;
       lines += `\nTransport: playing=${t.playing ? 'y' : 'n'} dir=${t.direction} speed=${t.speed} fps=${t.framesPerSec ?? 'N/A'} tickMs=${t.tickMs ?? 'N/A'} idx=${state.selectedFrameIdx ?? 'N/A'}`;
+      if (PERF_MODE && state.perf?.last) {
+        const p = state.perf.last;
+        lines += `\nPerf(ms): total=${p.total.toFixed(2)} setup=${p.setup.toFixed(2)} map=${p.map.toFixed(2)} ` +
+          `hotspots=${p.hotspots.toFixed(2)} flow=${p.flow.toFixed(2)} players=${p.players.toFixed(2)} ui=${p.ui.toFixed(2)}`;
+      }
+      if (PERF_MODE && state.perf) {
+        if (state.perf.lastFlowAgg) {
+          lines += `\nFlowAgg(ms): ${state.perf.lastFlowAgg.ms.toFixed(2)}`;
+        }
+        if (state.perf.lastLiveLoad) {
+          lines += `\nLiveLoad(ms): ${state.perf.lastLiveLoad.ms.toFixed(2)}`;
+        }
+        if (state.perf.lastFetch) {
+          lines += `\nFetch(ms): ${state.perf.lastFetch.ms.toFixed(2)}`;
+        }
+        if (Number.isFinite(state.perf.lastTickMs)) {
+          lines += `\nTick(ms): ${state.perf.lastTickMs.toFixed(2)}`;
+        }
+        if (Number.isFinite(state.perf.frameGapMs)) {
+          lines += `\nFrameGap(ms): ${state.perf.frameGapMs.toFixed(2)}`;
+        }
+        if (Number.isFinite(state.perf.lastTransportLagMs)) {
+          lines += `\nTransportLag(ms): ${state.perf.lastTransportLagMs.toFixed(2)}`;
+        }
+        if (performance?.memory?.usedJSHeapSize) {
+          const mb = performance.memory.usedJSHeapSize / (1024 * 1024);
+          lines += `\nHeap(MB): ${mb.toFixed(1)}`;
+        }
+        if (Number.isFinite(state.perf.heapDeltaMb)) {
+          lines += `\nHeapΔ(MB): ${state.perf.heapDeltaMb.toFixed(1)}`;
+        }
+        if (Number.isFinite(state.perf.longTaskLastMs)) {
+          lines += `\nLongTask(ms): ${state.perf.longTaskLastMs.toFixed(2)} count=${state.perf.longTaskCount ?? 0}`;
+        }
+      }
       if (state.diag.seek) {
         const s = state.diag.seek;
         lines += `\nSeek: input="${s.input ?? ''}" targetMs=${s.targetMs ?? 'N/A'} idx=${s.nearestIdx ?? 'N/A'} sec=${s.nearestSec ?? 'N/A'} delta=${s.deltaSec ?? 'N/A'}`;
@@ -1183,6 +1315,24 @@
     const yellowTh = metaValid ? Math.max(p90, minYellow) : minYellow;
     const redTh = metaValid ? Math.max(p99, minRed) : minRed;
     return { p90, p99, yellowTh, redTh, metaValid };
+  }
+
+  function buildWorldZdoBuckets(zones, thresholds) {
+    const buckets = { green: [], yellow: [], red: [] };
+    if (!Array.isArray(zones)) return buckets;
+    const th = thresholds || { yellowTh: 800, redTh: 2000 };
+    for (const entry of zones) {
+      if (entry?.zx == null || entry?.zy == null) continue;
+      const count = Number(entry.count ?? entry.v) || 0;
+      if (count <= 0) continue;
+      const { x, z } = zoneCenterWorld(entry.zx, entry.zy);
+      const { px, py } = worldToMapPx(x, z);
+      const item = { zx: entry.zx, zy: entry.zy, count, px, py };
+      if (count >= th.redTh) buckets.red.push(item);
+      else if (count >= th.yellowTh) buckets.yellow.push(item);
+      else buckets.green.push(item);
+    }
+    return buckets;
   }
 
   function maybeUpdateDebug(force = false) {
@@ -1375,9 +1525,23 @@
     return new Promise((resolve, reject) => {
       const img = new Image();
       img.onload = () => {
-        state.mapImg = img;
-        state.mapReady = true;
-        resolve();
+        const finish = () => {
+          state.mapImg = img;
+          state.mapReady = true;
+          resolve();
+        };
+        if ('createImageBitmap' in window) {
+          createImageBitmap(img).then((bmp) => {
+            state.mapBitmap = bmp;
+            finish();
+          }).catch(() => {
+            state.mapBitmap = null;
+            finish();
+          });
+        } else {
+          state.mapBitmap = null;
+          finish();
+        }
       };
       img.onerror = (e) => reject(e);
       img.src = 'map.png';
@@ -1402,6 +1566,7 @@
     state.view.zoom = clamp(scale, 0.05, 30);
     state.view.panX = (cw - imgW * state.view.zoom) / 2;
     state.view.panY = (ch - imgH * state.view.zoom) / 2;
+    state.playersLayerDirty = true;
   }
 
   // ---------- frame loading ----------
@@ -1531,7 +1696,12 @@
 
   async function loadLiveFrame() {
     const liveUrl = resolveAgainstManifest(getFrameLivePath());
+    const t0 = PERF_MODE ? performance.now() : 0;
     const fr = await fetchJson(liveUrl, true);
+    if (PERF_MODE && state?.perf?.enabled) {
+      const t1 = performance.now();
+      state.perf.lastLiveLoad = { ms: t1 - t0 };
+    }
     return fr;
   }
 
@@ -1549,7 +1719,18 @@
     const url = entry.url;
     state.archiveInflight.add(idx);
     try {
-      const fr = await fetchJson(url, true);
+      let fr = null;
+      if (state.isChromium && state.mode === 'ARCHIVE' && state.transport?.playing) {
+        const fetched = await fetchJsonText(url, true);
+        if (typeof parseFrameTextInWorker === 'function') {
+          fr = await parseFrameTextInWorker(fetched.text, `${idx}:${fetched.url}`);
+        }
+        if (!fr) {
+          fr = JSON.parse(fetched.text);
+        }
+      } else {
+        fr = await fetchJson(url, true);
+      }
       const res = { fr, resolvedSec: sec, url, idx, loadedAtMs: Date.now() };
       const win = state.archiveWindow;
       if (win && Number.isFinite(win.start) && Number.isFinite(win.end)) {

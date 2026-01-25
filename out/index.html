@@ -30,7 +30,9 @@
     .grid3 { display:grid; grid-template-columns: repeat(3, 1fr); gap:8px; }
     .small { font-size:12px; }
     button.active { background:rgba(74,163,255,.25); border-color: rgba(74,163,255,.6); color: var(--accent); }
-    #canvas { width:100%; height:100%; display:block; background:#05070a; }
+    #mapCanvas, #canvas { position:absolute; inset:0; width:100%; height:100%; display:block; }
+    #mapCanvas { background:#05070a; pointer-events:none; }
+    #canvas { background:transparent; }
     #overlayTopRight { position:absolute; top:10px; right:10px; background:rgba(0,0,0,.55); border:1px solid rgba(255,255,255,.12); border-radius:12px; padding:8px 10px; font-size:12px; color:var(--text); backdrop-filter: blur(6px); max-width:72ch; pointer-events:none; }
     #coordHud { position:absolute; left:10px; top:10px; background:rgba(0,0,0,.55); border:1px solid rgba(255,255,255,.12); border-radius:999px; padding:4px 10px; font-size:12px; color:var(--text); backdrop-filter: blur(6px); pointer-events:none; z-index:1; }
     #playersHud { position:absolute; left:10px; top:44px; background:rgba(0,0,0,.55); border:1px solid rgba(255,255,255,.12); border-radius:12px; padding:6px 10px; font-size:12px; color:var(--text); backdrop-filter: blur(6px); pointer-events:auto; min-width:140px; z-index:2; }
@@ -148,6 +150,7 @@
     </aside>
 
     <main id="main">
+      <canvas id="mapCanvas"></canvas>
       <canvas id="canvas"></canvas>
       <div id="overlayTopRight" class="mono">Initializing.</div>
       <div id="coordHud" class="mono">Cursor: off</div>
