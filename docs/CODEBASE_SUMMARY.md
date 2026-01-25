@@ -146,15 +146,15 @@
 
 ## 6) Risks, Weaknesses & Technical Debt
 
-1) `ValheimHeatFlowPlugin/Class1.cs`: World ZDO scan uses reflection on internal fields (`m_objectsByID`) and can disable on type mismatch. This is brittle across game updates. **Priority: High**
-2) `ValheimHeatFlowPlugin/Class1.cs`: World ZDO scan is incremental and cache-based; if the cursor never wraps (very large worlds), some zones may remain stale for long periods. **Priority: Medium**
-3) `ValheimHeatFlowPlugin/Class1.cs`: `TopN` config applies to flow/presence only; world_zdos has no TopN emission at source, which may create large deltas and heavy aggregation. **Priority: Medium**
-4) `aggregator.py`: World ZDO cache persistence is a single JSON file; corruption or partial write could block rehydration (no checksum). **Priority: Medium**
-5) `aggregator.py`: Stream ingestion ignores invalid lines without reporting counts, which can mask upstream schema regressions. **Priority: Medium**
-6) `aggregator.py`: Only one cadence is supported (30s); it’s fixed for world_zdos and mixed with configurable cadence for other streams, which can cause mismatched expectations. **Priority: Low**
-7) Viewer modules: Debug overlay uses URL flags (`diag`, `debugZones`, `dev`) that could be left enabled accidentally in production. **Priority: Low**
-8) Viewer modules: Biome lookup relies on browser `DecompressionStream` for gzip; unsupported browsers will fail TileGrid decoding silently. **Priority: Medium**
-10) `ValheimHeatFlowPlugin/Class2.cs`: Player ID uses `peer.m_uid` with fallback strings; if IDs are missing or unstable, TTL behavior could be inconsistent across reconnects. **Priority: Low**
-11) `docs/Hotspots_State.md`: World ZDO semantics rely on epoch/lazy overwrite; if the plugin changes epoch behavior, docs and aggregator assumptions can diverge. **Priority: Low**
-11) Viewer modules: Flow aggregation loads archived frames and clusters each window, which could be CPU heavy on large archives. **Priority: Medium**
+1) `ValheimHeatFlowPlugin/Class1.cs`: World ZDO scan uses reflection on internal fields (`m_objectsByID`) and can disable on type mismatch. This is brittle across game updates.
+2) `ValheimHeatFlowPlugin/Class1.cs`: World ZDO scan is incremental and cache-based; if the cursor never wraps (very large worlds), some zones may remain stale for long periods. 
+3) `ValheimHeatFlowPlugin/Class1.cs`: `TopN` config applies to flow/presence only; world_zdos has no TopN emission at source, which may create large deltas and heavy aggregation.
+4) `aggregator.py`: World ZDO cache persistence is a single JSON file; corruption or partial write could block rehydration (no checksum).
+5) `aggregator.py`: Stream ingestion ignores invalid lines without reporting counts, which can mask upstream schema regressions. 
+6) `aggregator.py`: Only one cadence is supported (30s); it’s fixed for world_zdos and mixed with configurable cadence for other streams, which can cause mismatched expectations.
+7) Viewer modules: Debug overlay uses URL flags (`diag`, `debugZones`, `dev`) that could be left enabled accidentally in production. 
+8) Viewer modules: Biome lookup relies on browser `DecompressionStream` for gzip; unsupported browsers will fail TileGrid decoding silently.
+10) `ValheimHeatFlowPlugin/Class2.cs`: Player ID uses `peer.m_uid` with fallback strings; if IDs are missing or unstable, TTL behavior could be inconsistent across reconnects. 
+11) `docs/Hotspots_State.md`: World ZDO semantics rely on epoch/lazy overwrite; if the plugin changes epoch behavior, docs and aggregator assumptions can diverge. 
+11) Viewer modules: Flow aggregation loads archived frames and clusters each window, which could be CPU heavy on large archives. 
 
