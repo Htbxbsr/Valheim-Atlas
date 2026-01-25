@@ -571,13 +571,24 @@
       const x = Number(btn.getAttribute('data-x'));
       const z = Number(btn.getAttribute('data-z'));
       centerOnWorld(x, z);
-      state.followPlayer = {
+      const next = {
         active: true,
         name: (btn.getAttribute('data-name') || '').trim(),
         id: (btn.getAttribute('data-id') || '').trim(),
         uid: (btn.getAttribute('data-uid') || '').trim(),
         zoom: state.view.zoom,
       };
+      const cur = state.followPlayer;
+      const same =
+        cur && cur.active &&
+        cur.name === next.name &&
+        cur.id === next.id &&
+        cur.uid === next.uid;
+      if (same) {
+        state.followPlayer = { active: false };
+      } else {
+        state.followPlayer = next;
+      }
     });
 
     window.addEventListener('keydown', (ev) => {
