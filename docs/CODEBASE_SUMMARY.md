@@ -158,10 +158,3 @@
 11) `docs/Hotspots_State.md`: World ZDO semantics rely on epoch/lazy overwrite; if the plugin changes epoch behavior, docs and aggregator assumptions can diverge. **Priority: Low**
 11) Viewer modules: Flow aggregation loads archived frames and clusters each window, which could be CPU heavy on large archives. **Priority: Medium**
 
-## 7) Quick Wins (≤2 hours each)
-
-1) Add lightweight schema validation counters in `aggregator.py` for each stream (e.g., number of rejected lines per interval).
-2) Ensure `out/index.html` is used.
-3) Add a small compatibility note in `docs/HOTSPOTS.md` about reflection targets and expected Valheim versions.
-4) Add a simple health/status panel in `out/index.html` that shows last event times per stream from `manifest.json`.
-5) Add a minimal “operations” section to `README.md` listing telemetry lines to monitor in production.
